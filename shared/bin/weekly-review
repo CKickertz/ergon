@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source /mnt/ssd/aletheia/shared/config/aletheia.env 2>/dev/null || true
+set -a
+source /mnt/ssd/aletheia/shared/config/aletheia.env
+set +a 2>/dev/null || true
 # Weekly Review - Memory consolidation and state sync
 # Run: Sunday mornings via cron or manually
 
@@ -20,7 +22,7 @@ echo ""
 # 2. Agent activity summary
 echo "## Agent Activity"
 for agent in syl chiron eiron demiurge; do
-    status_file="$ALETHEIA_ROOT/nous/syn/agent-status/${agent}.md"
+    status_file="$ALETHEIA_ROOT/nous/syn/nous-status/${agent}.md"
     if [[ -f "$status_file" ]]; then
         updated=$(stat -c %y "$status_file" 2>/dev/null | cut -d' ' -f1)
         echo "- **$agent**: Last update $updated"

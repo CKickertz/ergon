@@ -1,0 +1,85 @@
+#!/bin/bash
+set -eo pipefail
+set -a
+source /mnt/ssd/aletheia/shared/config/aletheia.env
+set +a 2>/dev/null || true
+
+# aletheia-watchdog — Check critical subprocess health + auto-recovery
+# Run via cron every 5 minutes
+
+LOG="/tmp/aletheia-watchdog.log"
+ALERT_FILE="/tmp/aletheia-watchdog-alerts.txt"
+FAIL_COUNT_FILE="/tmp/aletheia-watchdog-fails"
+MAX_FAILURES=3  # Consecutive failures before attempting checkpoint restore
+MAX_MEM_MB=3500
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG"; }
+
+get_fails() { cat "$FAIL_COUNT_FILE" 2>/dev/null || echo 0; }
+set_fails() { echo "$1" > "$FAIL_COUNT_FILE"; }
+
+# --- Gateway Health ---
+GATEWAY_PID=$(pgrep -f "openclaw-gateway\|aletheia gateway" 2>/dev/null | head -1 || true)
+
+if [[ -z "$GATEWAY_PID" ]]; then
+    FAILS=$(get_fails)
+    FAILS=$((FAILS + 1))
+    set_fails "$FAILS"
+    log "CRITICAL: Gateway not running (failure $FAILS/$MAX_FAILURES)"
+
+    if [[ "$FAILS" -ge "$MAX_FAILURES" ]]; then
+        log "RECOVERY: $MAX_FAILURES consecutive failures — attempting checkpoint restore"
+
+        # Try restore first
+        if checkpoint verify >/dev/null 2>&1; then
+            log "RECOVERY: System healthy after all — skipping restore"
+        else
+            checkpoint restore 2>&1 >> "$LOG" || true
+        fi
+
+        # Restart regardless
+        if systemctl is-active --quiet autarkia; then
+            sudo systemctl restart autarkia.service 2>&1 >> "$LOG"
+            log "RECOVERY: Service restarted"
+        else
+            sudo systemctl start autarkia.service 2>&1 >> "$LOG"
+            log "RECOVERY: Service started"
+        fi
+
+        set_fails 0
+        echo "Gateway crashed $MAX_FAILURES times, auto-recovered $(date)" >> "$ALERT_FILE"
+    else
+        # Simple restart attempt
+        sudo systemctl restart autarkia.service 2>&1 >> "$LOG" || true
+        log "Restart attempt $FAILS"
+    fi
+else
+    # Reset failure counter on success
+    set_fails 0
+
+    # Memory check
+    MEM_MB=$(ps -o rss= -p "$GATEWAY_PID" 2>/dev/null | awk '{print int($1/1024)}' || true)
+    if [[ -n "$MEM_MB" && "$MEM_MB" -gt "$MAX_MEM_MB" ]]; then
+        log "WARNING: Memory at ${MEM_MB}MB (threshold: ${MAX_MEM_MB}MB)"
+        echo "High memory: ${MEM_MB}MB at $(date)" >> "$ALERT_FILE"
+    fi
+fi
+
+# --- Signal-CLI Health ---
+if ! pgrep -f "signal-cli" >/dev/null 2>&1; then
+    log "WARNING: signal-cli not running"
+    # signal-cli is managed by the gateway, just log
+fi
+
+# --- Auto-checkpoint on healthy state (once per day) ---
+TODAY=$(date +%Y%m%d)
+LAST_CHECKPOINT="/tmp/aletheia-last-checkpoint"
+LAST_CP_DATE=$(cat "$LAST_CHECKPOINT" 2>/dev/null || echo "none")
+
+if [[ "$LAST_CP_DATE" != "$TODAY" ]] && [[ -n "$GATEWAY_PID" ]]; then
+    if checkpoint verify >/dev/null 2>&1; then
+        checkpoint save --label "daily-auto" >/dev/null 2>&1 || true
+        echo "$TODAY" > "$LAST_CHECKPOINT"
+        log "Daily auto-checkpoint saved"
+    fi
+fi
