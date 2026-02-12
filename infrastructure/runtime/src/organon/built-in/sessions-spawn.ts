@@ -1,9 +1,11 @@
 // Sub-nous spawning — run a scoped task on a temporary agent
 import type { ToolHandler, ToolContext } from "../registry.js";
 import type { InboundMessage, TurnOutcome } from "../../nous/manager.js";
+import type { SessionStore } from "../../mneme/store.js";
 
 export interface AgentDispatcher {
   handleMessage(msg: InboundMessage): Promise<TurnOutcome>;
+  store?: SessionStore;
 }
 
 export function createSessionsSpawnTool(
@@ -43,16 +45,25 @@ export function createSessionsSpawnTool(
       input: Record<string, unknown>,
       context: ToolContext,
     ): Promise<string> {
-      const task = input.task as string;
-      const agentId = (input.agentId as string) ?? context.nousId;
-      const timeoutSeconds = (input.timeoutSeconds as number) ?? 180;
+      const task = input["task"] as string;
+      const agentId = (input["agentId"] as string) ?? context.nousId;
+      const timeoutSeconds = (input["timeoutSeconds"] as number) ?? 180;
       const sessionKey =
-        (input.sessionKey as string) ??
+        (input["sessionKey"] as string) ??
         `spawn:${context.nousId}:${Date.now().toString(36)}`;
 
       if (!dispatcher) {
         return JSON.stringify({ error: "Agent dispatch not available" });
       }
+
+      // Audit trail
+      const auditId = dispatcher.store?.recordCrossAgentCall({
+        sourceSessionId: context.sessionId,
+        sourceNousId: context.nousId,
+        targetNousId: agentId,
+        kind: "spawn",
+        content: task.slice(0, 2000),
+      });
 
       let timer: ReturnType<typeof setTimeout>;
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -68,13 +79,23 @@ export function createSessionsSpawnTool(
             text: task,
             nousId: agentId,
             sessionKey,
+            parentSessionId: context.sessionId,
             channel: "spawn",
             peerKind: "agent",
             peerId: context.nousId,
+            depth: (context.depth ?? 0) + 1,
           }),
           timeoutPromise,
         ]);
         clearTimeout(timer!);
+
+        if (auditId && dispatcher.store) {
+          dispatcher.store.updateCrossAgentCall(auditId, {
+            targetSessionId: outcome.sessionId,
+            status: "responded",
+            response: outcome.text,
+          });
+        }
 
         return JSON.stringify({
           agentId,
@@ -88,6 +109,15 @@ export function createSessionsSpawnTool(
         });
       } catch (err) {
         clearTimeout(timer!);
+
+        if (auditId && dispatcher.store) {
+          const isTimeout = err instanceof Error && err.message.includes("Timeout");
+          dispatcher.store.updateCrossAgentCall(auditId, {
+            status: isTimeout ? "timeout" : "error",
+            response: err instanceof Error ? err.message : String(err),
+          });
+        }
+
         return JSON.stringify({
           agentId,
           sessionKey,

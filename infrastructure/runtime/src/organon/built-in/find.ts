@@ -1,8 +1,8 @@
 // File search tool — find files by name pattern
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { resolve } from "node:path";
 import type { ToolHandler, ToolContext } from "../registry.js";
+import { safePath } from "./safe-path.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -42,13 +42,13 @@ export const findTool: ToolHandler = {
     input: Record<string, unknown>,
     context: ToolContext,
   ): Promise<string> {
-    const pattern = input.pattern as string;
-    const searchPath = input.path
-      ? resolve(context.workspace, input.path as string)
+    const pattern = input["pattern"] as string;
+    const searchPath = input["path"]
+      ? safePath(context.workspace, input["path"] as string)
       : context.workspace;
-    const type = input.type as string | undefined;
-    const maxDepth = input.maxDepth as number | undefined;
-    const maxResults = (input.maxResults as number) ?? 100;
+    const type = input["type"] as string | undefined;
+    const maxDepth = input["maxDepth"] as number | undefined;
+    const maxResults = (input["maxResults"] as number) ?? 100;
 
     const args = ["--color=never"];
 

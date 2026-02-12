@@ -2,10 +2,12 @@
 import { createLogger } from "../koina/logger.js";
 import { SessionStore, type Message } from "../mneme/store.js";
 import { ProviderRouter } from "../hermeneus/router.js";
-import { estimateTokens } from "../hermeneus/token-counter.js";
+import { estimateTokens, estimateToolDefTokens } from "../hermeneus/token-counter.js";
 import { ToolRegistry, type ToolContext } from "../organon/registry.js";
 import { assembleBootstrap } from "./bootstrap.js";
-import { shouldDistill, distillSession } from "../distillation/pipeline.js";
+import { detectBootstrapDiff, logBootstrapDiff } from "./bootstrap-diff.js";
+import { distillSession } from "../distillation/pipeline.js";
+import { scoreComplexity, selectModel, type ComplexityTier } from "../hermeneus/complexity.js";
 import type { AletheiaConfig } from "../taxis/schema.js";
 import {
   resolveNous,
@@ -15,23 +17,35 @@ import {
 } from "../taxis/loader.js";
 import type {
   ContentBlock,
+  ImageBlock,
   MessageParam,
   ToolUseBlock,
   UserContentBlock,
 } from "../hermeneus/anthropic.js";
 import type { PluginRegistry } from "../prostheke/registry.js";
+import type { Watchdog } from "../daemon/watchdog.js";
+import { TraceBuilder } from "./trace.js";
 
 const log = createLogger("nous");
+
+export interface MediaAttachment {
+  contentType: string;
+  data: string;
+  filename?: string;
+}
 
 export interface InboundMessage {
   text: string;
   nousId?: string;
   sessionKey?: string;
+  parentSessionId?: string;
   channel?: string;
   peerId?: string;
   peerKind?: string;
   accountId?: string;
-  mediaUrls?: string[];
+  media?: MediaAttachment[];
+  model?: string;
+  depth?: number;
 }
 
 export interface TurnOutcome {
@@ -41,6 +55,8 @@ export interface TurnOutcome {
   toolCalls: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 // Per-session mutex to prevent concurrent turns from corrupting context
@@ -61,6 +77,10 @@ function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T>
 
 export class NousManager {
   private plugins?: PluginRegistry;
+  private watchdog?: Watchdog;
+  private skillsSection?: string | undefined;
+  activeTurns = 0;
+  isDraining: () => boolean = () => false;
 
   constructor(
     private config: AletheiaConfig,
@@ -77,7 +97,24 @@ export class NousManager {
     this.plugins = plugins;
   }
 
+  setWatchdog(watchdog: Watchdog): void {
+    this.watchdog = watchdog;
+  }
+
+  setSkillsSection(section: string | undefined): void {
+    this.skillsSection = section;
+  }
+
   async handleMessage(msg: InboundMessage): Promise<TurnOutcome> {
+    if (this.isDraining()) {
+      throw new Error("Runtime is shutting down — rejecting new messages");
+    }
+
+    const maxDepth = this.config.session.agentToAgent.maxPingPongTurns;
+    if (msg.depth && msg.depth >= maxDepth) {
+      throw new Error(`Cross-agent depth limit (${maxDepth}) exceeded`);
+    }
+
     const nousId = this.resolveNousId(msg);
     const nous = resolveNous(this.config, nousId);
     if (!nous) {
@@ -85,17 +122,41 @@ export class NousManager {
     }
 
     const sessionKey = msg.sessionKey ?? "main";
-    const model = resolveModel(this.config, nous);
+    let model = msg.model ?? resolveModel(this.config, nous);
+
+    // Adaptive inference routing — select model tier based on message complexity
+    const routing = this.config.agents.defaults.routing;
+    if (routing.enabled && !msg.model) {
+      const session = this.store.findSession(nousId, sessionKey);
+      const override = routing.agentOverrides[nousId] as ComplexityTier | undefined;
+      const complexity = scoreComplexity({
+        messageText: msg.text,
+        messageCount: session?.messageCount ?? 0,
+        depth: msg.depth ?? 0,
+        ...(override ? { agentOverride: override } : {}),
+      });
+      model = selectModel(complexity.tier, routing.tiers);
+      log.info(
+        `Routing ${nousId}: ${complexity.tier} (score=${complexity.score}, ${complexity.reason}) → ${model}`,
+      );
+    }
+
     const session = this.store.findOrCreateSession(
       nousId,
       sessionKey,
       model,
+      msg.parentSessionId,
     );
 
     // Serialize concurrent turns on the same session
-    return withSessionLock(session.id, () =>
-      this.executeTurn(nousId, session.id, sessionKey, model, msg, nous),
-    );
+    this.activeTurns++;
+    try {
+      return await withSessionLock(session.id, () =>
+        this.executeTurn(nousId, session.id, sessionKey, model, msg, nous),
+      );
+    } finally {
+      this.activeTurns--;
+    }
   }
 
   private async executeTurn(
@@ -113,34 +174,100 @@ export class NousManager {
     );
 
     const workspace = resolveWorkspace(this.config, nous);
+
+    // Check watchdog for degraded services — inject into bootstrap
+    const degradedServices: string[] = [];
+    if (this.watchdog) {
+      for (const svc of this.watchdog.getStatus()) {
+        if (!svc.healthy) degradedServices.push(svc.name);
+      }
+    }
+
     const bootstrap = assembleBootstrap(workspace, {
-      maxTokens: this.config.agents.defaults.bootstrapMaxChars,
+      maxTokens: this.config.agents.defaults.bootstrapMaxTokens,
+      ...(this.skillsSection ? { skillsSection: this.skillsSection } : {}),
+      ...(degradedServices.length > 0 ? { degradedServices } : {}),
     });
+
+    // Store composite hash and detect file-level diffs
+    this.store.updateBootstrapHash(sessionId, bootstrap.contentHash);
+    const diff = detectBootstrapDiff(nousId, bootstrap.fileHashes, workspace);
+    if (diff) logBootstrapDiff(diff, workspace);
+
+    if (bootstrap.droppedFiles.length > 0) {
+      log.warn(`Bootstrap for ${nousId} dropped files due to budget: ${bootstrap.droppedFiles.join(", ")}`);
+    }
+
+    // Initialize causal trace for this turn
+    const trace = new TraceBuilder(sessionId, nousId, 0, model);
+    trace.setBootstrap(
+      Object.keys(bootstrap.fileHashes),
+      bootstrap.totalTokens,
+    );
+    if (degradedServices.length > 0) {
+      trace.setDegradedServices(degradedServices);
+    }
 
     const systemPrompt = [
       ...bootstrap.staticBlocks,
       ...bootstrap.dynamicBlocks,
     ];
 
-    const history = this.store.getHistoryWithBudget(
-      sessionId,
-      this.config.agents.defaults.contextTokens - bootstrap.totalTokens - 8000,
-    );
+    const toolDefs = this.tools.getDefinitions({
+      ...(nous.tools.allow.length > 0 ? { allow: nous.tools.allow } : {}),
+      ...(nous.tools.deny.length > 0 ? { deny: nous.tools.deny } : {}),
+    });
+
+    // Tool definitions count toward the input token budget — estimate with safety margin
+    const toolDefTokens = estimateToolDefTokens(toolDefs);
+
+    const contextTokens = this.config.agents.defaults.contextTokens;
+    const maxOutput = this.config.agents.defaults.maxOutputTokens;
+    const historyBudget = Math.max(0, contextTokens - bootstrap.totalTokens - toolDefTokens - maxOutput);
+
+    const history = this.store.getHistoryWithBudget(sessionId, historyBudget);
+
+    // Surface unsurfaced cross-agent messages into this session
+    let crossAgentNotice: string | null = null;
+    const unsurfaced = this.store.getUnsurfacedMessages(nousId);
+    if (unsurfaced.length > 0) {
+      const lines = unsurfaced.map((m) => {
+        const from = m.sourceNousId ?? "unknown";
+        const summary = m.response ? `\n  Response: ${m.response.slice(0, 500)}` : "";
+        return `[From ${from}, ${m.kind}] ${m.content}${summary}`;
+      });
+      crossAgentNotice =
+        `While you were in another conversation, you received cross-agent messages:\n\n` +
+        lines.join("\n\n") +
+        `\n\nThe user may not be aware of these. Mention them if relevant.`;
+
+      this.store.appendMessage(sessionId, "user", crossAgentNotice, {
+        tokenEstimate: estimateTokens(crossAgentNotice),
+      });
+      this.store.markMessagesSurfaced(
+        unsurfaced.map((m) => m.id),
+        sessionId,
+      );
+      log.info(`Surfaced ${unsurfaced.length} cross-agent messages into session ${sessionId}`);
+    }
 
     const seq = this.store.appendMessage(sessionId, "user", msg.text, {
       tokenEstimate: estimateTokens(msg.text),
     });
 
-    const messages = this.buildMessages(history, msg.text);
-    const toolDefs = this.tools.getDefinitions({
-      allow: nous.tools.allow.length > 0 ? nous.tools.allow : undefined,
-      deny: nous.tools.deny.length > 0 ? nous.tools.deny : undefined,
-    });
+    // Build messages from history, injecting any cross-agent notice before current text.
+    // The notice was stored in DB but history was fetched before it was appended,
+    // so we must inject it manually for the current turn.
+    const currentText = crossAgentNotice
+      ? crossAgentNotice + "\n\n" + msg.text
+      : msg.text;
+    const messages = this.buildMessages(history, currentText, msg.media);
 
     const toolContext: ToolContext = {
       nousId,
       sessionId,
       workspace,
+      depth: msg.depth ?? 0,
     };
 
     if (this.plugins) {
@@ -148,12 +275,15 @@ export class NousManager {
         nousId,
         sessionId,
         messageText: msg.text,
+        ...(msg.media ? { media: msg.media } : {}),
       });
     }
 
     let totalToolCalls = 0;
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
+    let totalCacheReadTokens = 0;
+    let totalCacheWriteTokens = 0;
     let currentMessages = messages;
 
     const MAX_TOOL_LOOPS = 20;
@@ -162,12 +292,14 @@ export class NousManager {
         model,
         system: systemPrompt,
         messages: currentMessages,
-        tools: toolDefs.length > 0 ? toolDefs : undefined,
-        maxTokens: 8192,
+        ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
+        maxTokens: this.config.agents.defaults.maxOutputTokens,
       });
 
       totalInputTokens += result.usage.inputTokens;
       totalOutputTokens += result.usage.outputTokens;
+      totalCacheReadTokens += result.usage.cacheReadTokens;
+      totalCacheWriteTokens += result.usage.cacheWriteTokens;
 
       this.store.recordUsage({
         sessionId,
@@ -202,31 +334,62 @@ export class NousManager {
           toolCalls: totalToolCalls,
           inputTokens: totalInputTokens,
           outputTokens: totalOutputTokens,
+          cacheReadTokens: totalCacheReadTokens,
+          cacheWriteTokens: totalCacheWriteTokens,
         };
+
+        // Finalize and persist causal trace
+        trace.setUsage(totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens);
+        trace.setResponseLength(text.length);
+        trace.setToolLoops(loop + 1);
+        const finalTrace = trace.finalize();
+        (await import("./trace.js")).persistTrace(finalTrace, workspace);
+
+        const cacheHitRate = totalInputTokens > 0
+          ? Math.round((totalCacheReadTokens / totalInputTokens) * 100)
+          : 0;
+        log.info(
+          `Turn complete for ${nousId}: ${totalInputTokens}in/${totalOutputTokens}out, ` +
+          `cache ${totalCacheReadTokens}r/${totalCacheWriteTokens}w (${cacheHitRate}% hit), ` +
+          `${totalToolCalls} tool calls`,
+        );
+
+        // Store actual API-reported context consumption for accurate distillation triggering
+        this.store.updateSessionActualTokens(sessionId, totalInputTokens);
 
         if (this.plugins) {
           await this.plugins.dispatchAfterTurn({
             nousId,
             sessionId,
             responseText: text,
+            messageText: msg.text,
             toolCalls: totalToolCalls,
             inputTokens: totalInputTokens,
             outputTokens: totalOutputTokens,
           });
         }
 
-        // Auto-trigger distillation when context grows too large
-        const contextTokens = this.config.agents.defaults.contextTokens;
-        const threshold = Math.floor(contextTokens * 0.65);
+        // Auto-trigger distillation using actual API-reported input tokens (most accurate)
+        // Falls back to heuristic estimate if actual tokens aren't available
+        const compaction = this.config.agents.defaults.compaction;
+        const distillThreshold = Math.floor(contextTokens * compaction.maxHistoryShare);
         try {
-          if (await shouldDistill(this.store, sessionId, { threshold, minMessages: 10 })) {
-            log.info(`Distillation triggered for session ${sessionId}`);
+          const session = this.store.findSessionById(sessionId);
+          const actualContext = session?.lastInputTokens ?? session?.tokenCountEstimate ?? 0;
+          if (session && session.messageCount >= 10 && actualContext >= distillThreshold) {
+            const utilization = Math.round((actualContext / contextTokens) * 100);
+            log.info(
+              `Distillation triggered for ${nousId} session=${sessionId} ` +
+              `(${utilization}% context, threshold=${Math.round(compaction.maxHistoryShare * 100)}%, ` +
+              `actual=${actualContext} tokens)`,
+            );
+            const distillModel = compaction.distillationModel;
             await distillSession(this.store, this.router, sessionId, nousId, {
-              triggerThreshold: threshold,
+              triggerThreshold: distillThreshold,
               minMessages: 10,
-              extractionModel: "claude-haiku-4-5-20251001",
-              summaryModel: "claude-haiku-4-5-20251001",
-              plugins: this.plugins,
+              extractionModel: distillModel,
+              summaryModel: distillModel,
+              ...(this.plugins ? { plugins: this.plugins } : {}),
             });
           }
         } catch (err) {
@@ -259,6 +422,7 @@ export class NousManager {
 
         let toolResult: string;
         let isError = false;
+        const toolStart = Date.now();
         try {
           toolResult = await this.tools.execute(
             toolUse.name,
@@ -270,12 +434,21 @@ export class NousManager {
           toolResult = err instanceof Error ? err.message : String(err);
           log.warn(`Tool ${toolUse.name} failed: ${toolResult}`);
         }
+        const toolDuration = Date.now() - toolStart;
+
+        trace.addToolCall({
+          name: toolUse.name,
+          input: toolUse.input as Record<string, unknown>,
+          output: toolResult.slice(0, 500),
+          durationMs: toolDuration,
+          isError,
+        });
 
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,
           content: toolResult,
-          is_error: isError || undefined,
+          ...(isError ? { is_error: true } : {}),
         });
 
         this.store.appendMessage(sessionId, "tool_result", toolResult, {
@@ -317,6 +490,7 @@ export class NousManager {
   private buildMessages(
     history: Message[],
     currentText: string,
+    media?: MediaAttachment[],
   ): MessageParam[] {
     const messages: MessageParam[] = [];
 
@@ -377,11 +551,70 @@ export class NousManager {
       }
     }
 
-    messages.push({
-      role: "user",
-      content: currentText,
-    });
+    // Current message — multimodal if images present
+    const imageMedia = media?.filter((m) =>
+      /^image\/(jpeg|png|gif|webp)$/i.test(m.contentType),
+    );
+    if (imageMedia && imageMedia.length > 0) {
+      const blocks: UserContentBlock[] = [];
+      for (const img of imageMedia) {
+        // Strip data URI prefix if present
+        let data = img.data;
+        const dataUriMatch = data.match(/^data:[^;]+;base64,(.+)$/);
+        if (dataUriMatch) data = dataUriMatch[1]!;
 
-    return messages;
+        blocks.push({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: img.contentType,
+            data,
+          },
+        } as ImageBlock);
+      }
+      blocks.push({ type: "text", text: currentText });
+      messages.push({ role: "user", content: blocks });
+    } else {
+      messages.push({ role: "user", content: currentText });
+    }
+
+    // Merge consecutive user messages to prevent Anthropic 400 errors
+    const merged: MessageParam[] = [];
+    for (const m of messages) {
+      const prev = merged[merged.length - 1];
+      if (
+        prev &&
+        prev.role === "user" &&
+        m.role === "user" &&
+        typeof prev.content === "string" &&
+        typeof m.content === "string"
+      ) {
+        prev.content = prev.content + "\n\n" + m.content;
+      } else {
+        merged.push({ ...m });
+      }
+    }
+
+    return merged;
+  }
+
+  async triggerDistillation(sessionId: string): Promise<void> {
+    const compaction = this.config.agents.defaults.compaction;
+    const contextTokens = this.config.agents.defaults.contextTokens ?? 200000;
+    const distillThreshold = Math.floor(contextTokens * compaction.maxHistoryShare);
+    const distillModel = compaction.distillationModel;
+
+    const session = this.store.findSessionById(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+
+    log.info(`Manual distillation triggered for session ${sessionId}`);
+    await distillSession(this.store, this.router, sessionId, session.nousId, {
+      triggerThreshold: distillThreshold,
+      minMessages: 4,
+      extractionModel: distillModel,
+      summaryModel: distillModel,
+      ...(this.plugins ? { plugins: this.plugins } : {}),
+    });
   }
 }
+

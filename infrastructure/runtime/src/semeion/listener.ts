@@ -1,9 +1,14 @@
 // SSE event stream consumer — dispatches Signal messages to NousManager
 import { createLogger } from "../koina/logger.js";
-import type { NousManager, InboundMessage } from "../nous/manager.js";
+import type { NousManager, InboundMessage, MediaAttachment } from "../nous/manager.js";
 import { SignalClient } from "./client.js";
 import { sendMessage, sendTyping, sendReadReceipt, type SendTarget } from "./sender.js";
-import type { SignalAccount } from "../taxis/schema.js";
+import type { SignalAccount, AletheiaConfig } from "../taxis/schema.js";
+import type { SessionStore } from "../mneme/store.js";
+import type { CommandRegistry, CommandContext } from "./commands.js";
+import type { Watchdog } from "../daemon/watchdog.js";
+import type { SkillRegistry } from "../organon/skills.js";
+import { preprocessLinks } from "./preprocess.js";
 
 const log = createLogger("semeion:listen");
 
@@ -57,10 +62,19 @@ export interface ListenerOpts {
   baseUrl: string;
   abortSignal?: AbortSignal;
   boundGroupIds?: Set<string>;
+  onStatusRequest?: (target: SendTarget) => Promise<void>;
+  commands?: CommandRegistry;
+  store?: SessionStore;
+  config?: AletheiaConfig;
+  watchdog?: Watchdog | null;
+  skills?: SkillRegistry | null;
 }
 
+const MAX_CONCURRENT_TURNS = 3;
+const activeTurns = new Map<string, number>();
+
 export async function startListener(opts: ListenerOpts): Promise<void> {
-  const { accountId, account, manager, client, baseUrl, abortSignal, boundGroupIds } = opts;
+  const { accountId, account, manager, client, baseUrl, abortSignal, boundGroupIds, onStatusRequest, commands, store, config, watchdog, skills } = opts;
   const accountPhone = account.account ?? accountId;
 
   log.info(`Starting SSE listener for account ${accountId}`);
@@ -72,7 +86,7 @@ export async function startListener(opts: ListenerOpts): Promise<void> {
       await consumeEventStream(
         baseUrl,
         accountPhone,
-        (envelope) => handleEnvelope(envelope, accountId, account, manager, client, boundGroupIds),
+        (envelope) => handleEnvelope(envelope, accountId, account, manager, client, boundGroupIds, onStatusRequest, commands, store, config, watchdog, skills),
         abortSignal,
       );
       backoff.current = backoff.min;
@@ -96,15 +110,17 @@ export async function startListener(opts: ListenerOpts): Promise<void> {
 async function consumeEventStream(
   baseUrl: string,
   account: string,
-  onEnvelope: (envelope: SignalEnvelope) => Promise<void>,
+  onEnvelope: (envelope: SignalEnvelope) => void,
   abortSignal?: AbortSignal,
 ): Promise<void> {
   const url = `${baseUrl}/api/v1/events?account=${encodeURIComponent(account)}`;
 
-  const res = await fetch(url, {
+  const fetchOpts: RequestInit = {
     headers: { Accept: "text/event-stream" },
-    signal: abortSignal,
-  });
+  };
+  if (abortSignal) fetchOpts.signal = abortSignal;
+
+  const res = await fetch(url, fetchOpts);
 
   if (!res.ok) {
     throw new Error(`SSE connect failed: ${res.status} ${res.statusText}`);
@@ -142,7 +158,7 @@ async function consumeEventStream(
               const payload = JSON.parse(currentEvent.data);
               const envelope = payload?.envelope as SignalEnvelope | undefined;
               if (envelope) {
-                await onEnvelope(envelope);
+                onEnvelope(envelope);
               }
             } catch (parseErr) {
               log.warn(
@@ -164,23 +180,44 @@ async function consumeEventStream(
         }
       }
     }
+
+    // Flush any remaining event that wasn't terminated by a blank line
+    if (currentEvent.data && (!currentEvent.event || currentEvent.event === "receive")) {
+      try {
+        const payload = JSON.parse(currentEvent.data);
+        const envelope = payload?.envelope as SignalEnvelope | undefined;
+        if (envelope) {
+          onEnvelope(envelope);
+        }
+      } catch (parseErr) {
+        log.warn(
+          `Failed to parse final SSE data: ${parseErr instanceof Error ? parseErr.message : parseErr}`,
+        );
+      }
+    }
   } finally {
     reader.releaseLock();
   }
 }
 
-async function handleEnvelope(
+function handleEnvelope(
   envelope: SignalEnvelope,
   accountId: string,
   account: SignalAccount,
   manager: NousManager,
   client: SignalClient,
   boundGroupIds?: Set<string>,
-): Promise<void> {
+  onStatusRequest?: (target: SendTarget) => Promise<void>,
+  commands?: CommandRegistry,
+  store?: SessionStore,
+  config?: AletheiaConfig,
+  watchdog?: Watchdog | null,
+  skills?: SkillRegistry | null,
+): void {
   if (envelope.syncMessage) return;
+  if (envelope.editMessage) return;
 
-  const dataMessage =
-    envelope.editMessage?.dataMessage ?? envelope.dataMessage;
+  const dataMessage = envelope.dataMessage;
   if (!dataMessage) return;
 
   // Accept messages with text, quoted text, or attachments
@@ -198,7 +235,21 @@ async function handleEnvelope(
   const isGroup = !!dataMessage.groupInfo?.groupId;
   const groupId = dataMessage.groupInfo?.groupId;
 
-  if (!checkAccess(sender, isGroup, groupId, account, boundGroupIds)) {
+  const pairingTarget: SendTarget = { account: accountPhone };
+  if (!isGroup) pairingTarget.recipient = sender;
+  if (isGroup && groupId) pairingTarget.groupId = groupId;
+
+  const pairingCtx: PairingContext = {
+    client,
+    accountId,
+    accountPhone,
+    senderName: envelope.sourceName ?? sender,
+    target: pairingTarget,
+  };
+  if (store) pairingCtx.store = store;
+
+  const access = checkAccess(sender, isGroup, groupId, account, boundGroupIds, pairingCtx);
+  if (!access) {
     log.debug(`Blocked message from ${sender} (policy)`);
     return;
   }
@@ -224,8 +275,8 @@ async function handleEnvelope(
   // Append attachment info so the agent is aware
   if (dataMessage.attachments?.length) {
     for (const att of dataMessage.attachments) {
-      const name = att.filename ?? "unnamed";
-      const type = att.contentType ?? "unknown";
+      const name = sanitizeAttachmentField(att.filename ?? "unnamed");
+      const type = sanitizeAttachmentField(att.contentType ?? "unknown");
       const size = att.size ? `${Math.round(att.size / 1024)}KB` : "unknown size";
       text += `\n[Attachment: ${name} (${type}, ${size})${att.id ? ` id=${att.id}` : ""}]`;
     }
@@ -235,11 +286,44 @@ async function handleEnvelope(
     `Inbound ${isGroup ? "group" : "DM"} from ${envelope.sourceName ?? sender}: ${text.slice(0, 80)}`,
   );
 
-  const target: SendTarget = {
-    account: accountPhone,
-    recipient: isGroup ? undefined : sender,
-    groupId: isGroup ? groupId : undefined,
-  };
+  const target: SendTarget = { account: accountPhone };
+  if (!isGroup) target.recipient = sender;
+  if (isGroup && groupId) target.groupId = groupId;
+
+  // Command detection — bypass agent turn pipeline
+  if (commands && store && config) {
+    const match = commands.match(text);
+    if (match) {
+      log.info(`Command !${match.handler.name} from ${envelope.sourceName ?? sender}`);
+      const cmdCtx: CommandContext = {
+        sender: envelope.sourceUuid ?? sender,
+        senderName: envelope.sourceName ?? sender,
+        isGroup,
+        accountId,
+        target,
+        client,
+        store,
+        config,
+        manager,
+        watchdog: watchdog ?? null,
+        skills: skills ?? null,
+      };
+      match.handler
+        .execute(match.args, cmdCtx)
+        .then((result) => sendMessage(client, target, result, { markdown: false }))
+        .catch((err) => log.warn(`Command !${match.handler.name} failed: ${err instanceof Error ? err.message : err}`));
+      return;
+    }
+  }
+
+  // Legacy status command fallback (if no command registry)
+  if (!commands && onStatusRequest && !isGroup && text.trim().toLowerCase() === "status") {
+    log.info("Status command received, handling directly");
+    onStatusRequest(target).catch((err) =>
+      log.warn(`Status command failed: ${err instanceof Error ? err.message : err}`),
+    );
+    return;
+  }
 
   if (account.sendReadReceipts && !isGroup && envelope.timestamp) {
     sendReadReceipt(client, target, envelope.timestamp).catch((err) =>
@@ -265,6 +349,89 @@ async function handleEnvelope(
     sessionKey,
   };
 
+  // Concurrency guard — reject if at limit to protect API and SQLite
+  const accountTurns = activeTurns.get(accountId) ?? 0;
+  if (accountTurns >= MAX_CONCURRENT_TURNS) {
+    log.warn(`Concurrency limit reached for ${accountId} (${accountTurns}/${MAX_CONCURRENT_TURNS}), dropping message`);
+    sendMessage(client, target, "I'm handling several conversations right now. Give me a moment and try again.", { markdown: false })
+      .catch((err) => log.warn(`Failed to send busy message: ${err}`));
+    return;
+  }
+
+  // Fire-and-forget — the session mutex in manager.ts serializes same-session turns,
+  // while different nous/sessions process concurrently
+  activeTurns.set(accountId, accountTurns + 1);
+  preprocessAndProcess(manager, msg, client, target, dataMessage.attachments, accountPhone, account.mediaMaxMb).finally(() => {
+    const current = activeTurns.get(accountId) ?? 1;
+    if (current <= 1) {
+      activeTurns.delete(accountId);
+    } else {
+      activeTurns.set(accountId, current - 1);
+    }
+  });
+}
+
+async function preprocessAndProcess(
+  manager: NousManager,
+  msg: InboundMessage,
+  client: SignalClient,
+  target: SendTarget,
+  attachments?: Array<{ id?: string; contentType?: string; filename?: string; size?: number }>,
+  accountPhone?: string,
+  mediaMaxMb?: number,
+): Promise<void> {
+  // Fetch image attachments for vision
+  if (attachments?.length) {
+    const media: MediaAttachment[] = [];
+    const maxBytes = (mediaMaxMb ?? 25) * 1024 * 1024;
+
+    for (const att of attachments) {
+      if (!att.id) continue;
+      const ct = att.contentType ?? "";
+      if (!ct.startsWith("image/")) continue;
+      if (att.size && att.size > maxBytes) {
+        log.debug(`Skipping oversized attachment ${att.filename ?? att.id} (${att.size} bytes)`);
+        continue;
+      }
+
+      try {
+        const attParams: { id: string; account?: string } = { id: att.id };
+        if (accountPhone) attParams.account = accountPhone;
+        const result = await client.getAttachment(attParams);
+        if (typeof result === "string") {
+          const attachment: MediaAttachment = {
+            contentType: ct,
+            data: result,
+          };
+          if (att.filename) attachment.filename = att.filename;
+          media.push(attachment);
+          log.debug(`Fetched image attachment: ${att.filename ?? att.id} (${ct})`);
+        }
+      } catch (err) {
+        log.warn(`Failed to fetch attachment ${att.id}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    if (media.length > 0) {
+      msg.media = media;
+    }
+  }
+
+  // Link pre-processing: fetch URLs and append previews
+  try {
+    msg.text = await preprocessLinks(msg.text);
+  } catch (err) {
+    log.debug(`Link preprocessing failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+  }
+  return processTurn(manager, msg, client, target);
+}
+
+async function processTurn(
+  manager: NousManager,
+  msg: InboundMessage,
+  client: SignalClient,
+  target: SendTarget,
+): Promise<void> {
   try {
     const outcome = await manager.handleMessage(msg);
 
@@ -295,17 +462,26 @@ async function handleEnvelope(
   }
 }
 
+interface PairingContext {
+  store?: SessionStore;
+  client?: SignalClient;
+  accountId?: string;
+  accountPhone?: string;
+  senderName?: string;
+  target?: SendTarget;
+}
+
 function checkAccess(
   sender: string,
   isGroup: boolean,
   groupId: string | undefined,
   account: SignalAccount,
   boundGroupIds?: Set<string>,
+  pairingCtx?: PairingContext,
 ): boolean {
   if (isGroup) {
     if (account.groupPolicy === "disabled") return false;
     if (account.groupPolicy === "open") return true;
-    // Allowlist mode: check explicit groupAllowFrom, then fall back to bindings
     if (groupId && isInAllowlist(groupId, account.groupAllowFrom)) return true;
     if (groupId && boundGroupIds?.has(groupId)) return true;
     return false;
@@ -313,10 +489,28 @@ function checkAccess(
 
   if (account.dmPolicy === "disabled") return false;
   if (account.dmPolicy === "open") return true;
+
   if (account.dmPolicy === "pairing") {
-    log.warn(`DM policy "pairing" not implemented — treating as "open"`);
-    return true;
+    // Check static allowlist first
+    if (isInAllowlist(sender, account.allowFrom)) return true;
+    // Check dynamic approved contacts
+    if (pairingCtx?.store?.isApprovedContact(sender, "signal", pairingCtx.accountId)) return true;
+
+    // Initiate pairing flow
+    if (pairingCtx?.store && pairingCtx?.client && pairingCtx?.target) {
+      const { id, challengeCode } = pairingCtx.store.createContactRequest(
+        sender,
+        pairingCtx.senderName ?? sender,
+        "signal",
+        pairingCtx.accountId,
+      );
+      log.info(`Pairing request #${id} from ${pairingCtx.senderName ?? sender} (code: ${challengeCode})`);
+      sendMessage(pairingCtx.client, pairingCtx.target, `I don't know you yet. Ask an admin to approve code: ${challengeCode}`, { markdown: false })
+        .catch((err) => log.warn(`Failed to send pairing message: ${err}`));
+    }
+    return false;
   }
+
   return isInAllowlist(sender, account.allowFrom);
 }
 
@@ -354,7 +548,7 @@ function hydrateMentions(
   const sorted = [...mentions].sort((a, b) => (b.start ?? 0) - (a.start ?? 0));
 
   for (const mention of sorted) {
-    if (mention.start == null || mention.length == null) continue;
+    if (mention.start === null || mention.length === null) continue;
 
     // Strip self-mentions (the bot's own mention placeholder)
     const isSelf =
@@ -363,27 +557,35 @@ function hydrateMentions(
         normalizePhone(mention.number ?? "") === normalizePhone(selfAccount));
     if (isSelf) {
       result =
-        result.slice(0, mention.start) +
-        result.slice(mention.start + mention.length);
+        result.slice(0, mention.start!) +
+        result.slice(mention.start! + mention.length!);
       continue;
     }
 
     const id = mention.uuid ?? mention.number ?? mention.name ?? "unknown";
     result =
-      result.slice(0, mention.start) +
+      result.slice(0, mention.start!) +
       `@${id}` +
-      result.slice(mention.start + mention.length);
+      result.slice(mention.start! + mention.length!);
   }
 
   return result.trim();
 }
 
+function sanitizeAttachmentField(value: string): string {
+  return value.replaceAll("\n", "").replaceAll("\r", "").replaceAll(String.fromCharCode(0), "").replaceAll("[", "").replaceAll("]", "");
+}
+
 function sleep(ms: number, abortSignal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    abortSignal?.addEventListener("abort", () => {
+    const onAbort = () => {
       clearTimeout(timer);
       resolve();
-    }, { once: true });
+    };
+    const timer = setTimeout(() => {
+      abortSignal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
   });
 }

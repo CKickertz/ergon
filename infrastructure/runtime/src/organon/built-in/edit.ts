@@ -1,7 +1,7 @@
 // File edit tool — find and replace
 import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
 import type { ToolHandler, ToolContext } from "../registry.js";
+import { safePath } from "./safe-path.js";
 
 export const editTool: ToolHandler = {
   definition: {
@@ -31,10 +31,14 @@ export const editTool: ToolHandler = {
     input: Record<string, unknown>,
     context: ToolContext,
   ): Promise<string> {
-    const filePath = input.path as string;
-    const oldText = input.old_text as string;
-    const newText = input.new_text as string;
-    const resolved = resolve(context.workspace, filePath);
+    const filePath = input["path"] as string;
+    const oldText = input["old_text"] as string;
+    const newText = input["new_text"] as string;
+    const resolved = safePath(context.workspace, filePath);
+
+    if (oldText === "") {
+      return "Error: old_text cannot be empty — it would match everywhere";
+    }
 
     try {
       const content = readFileSync(resolved, "utf-8");

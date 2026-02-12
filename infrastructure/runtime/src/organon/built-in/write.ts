@@ -1,7 +1,8 @@
 // File write tool
 import { writeFileSync, mkdirSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { dirname } from "node:path";
 import type { ToolHandler, ToolContext } from "../registry.js";
+import { safePath } from "./safe-path.js";
 
 export const writeTool: ToolHandler = {
   definition: {
@@ -30,10 +31,10 @@ export const writeTool: ToolHandler = {
     input: Record<string, unknown>,
     context: ToolContext,
   ): Promise<string> {
-    const filePath = input.path as string;
-    const content = input.content as string;
-    const append = (input.append as boolean) ?? false;
-    const resolved = resolve(context.workspace, filePath);
+    const filePath = input["path"] as string;
+    const content = input["content"] as string;
+    const append = (input["append"] as boolean) ?? false;
+    const resolved = safePath(context.workspace, filePath);
 
     try {
       mkdirSync(dirname(resolved), { recursive: true });

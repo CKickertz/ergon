@@ -15,12 +15,14 @@ export interface TurnContext {
   nousId: string;
   sessionId: string;
   messageText: string;
+  media?: Array<{ contentType: string; data: string; filename?: string }>;
 }
 
 export interface TurnResult {
   nousId: string;
   sessionId: string;
   responseText: string;
+  messageText: string;
   toolCalls: number;
   inputTokens: number;
   outputTokens: number;
