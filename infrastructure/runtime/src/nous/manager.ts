@@ -8,7 +8,7 @@ import { ToolRegistry, type ToolContext } from "../organon/registry.js";
 import { assembleBootstrap } from "./bootstrap.js";
 import { detectBootstrapDiff, logBootstrapDiff } from "./bootstrap-diff.js";
 import { distillSession } from "../distillation/pipeline.js";
-import { scoreComplexity, selectModel, type ComplexityTier } from "../hermeneus/complexity.js";
+import { scoreComplexity, selectModel, selectTemperature, type ComplexityTier } from "../hermeneus/complexity.js";
 import type { AletheiaConfig } from "../taxis/schema.js";
 import {
   resolveNous,
@@ -83,15 +83,15 @@ function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T>
   return current;
 }
 
-// Ephemeral timestamp formatting — absolute times in operator timezone (America/Chicago)
+// Ephemeral timestamp formatting — absolute times in operator timezone
 // Injected at API-call time only, never stored. Uses absolute format because
 // relative time ("yesterday") becomes inaccurate as conversations age.
-function formatEphemeralTimestamp(isoString: string): string | null {
+function formatEphemeralTimestamp(isoString: string, tz: string = "UTC"): string | null {
   try {
     const d = new Date(isoString);
     if (isNaN(d.getTime())) return null;
     return d.toLocaleString("en-US", {
-      timeZone: "America/Chicago",
+      timeZone: tz,
       month: "short",
       day: "numeric",
       hour: "numeric",
@@ -163,6 +163,7 @@ export class NousManager {
     let model = msg.model ?? resolveModel(this.config, nous);
 
     // Adaptive inference routing — select model tier based on message complexity
+    let temperature: number | undefined;
     const routing = this.config.agents.defaults.routing;
     if (routing.enabled && !msg.model) {
       const session = this.store.findSession(nousId, sessionKey);
@@ -174,8 +175,9 @@ export class NousManager {
         ...(override ? { agentOverride: override } : {}),
       });
       model = selectModel(complexity.tier, routing.tiers);
+      temperature = selectTemperature(complexity.tier, this.tools.hasTools());
       log.info(
-        `Routing ${nousId}: ${complexity.tier} (score=${complexity.score}, ${complexity.reason}) → ${model}`,
+        `Routing ${nousId}: ${complexity.tier} (score=${complexity.score}, ${complexity.reason}) → ${model} temp=${temperature}`,
       );
     }
 
@@ -190,7 +192,7 @@ export class NousManager {
     this.activeTurns++;
     try {
       return await withSessionLock(session.id, () =>
-        this.executeTurn(nousId, session.id, sessionKey, model, msg, nous),
+        this.executeTurn(nousId, session.id, sessionKey, model, msg, nous, temperature),
       );
     } finally {
       this.activeTurns--;
@@ -204,6 +206,7 @@ export class NousManager {
     model: string,
     msg: InboundMessage,
     nous: ReturnType<typeof resolveNous>,
+    temperature?: number,
   ): Promise<TurnOutcome> {
     if (!nous) throw new Error(`Unknown nous: ${nousId}`);
 
@@ -271,10 +274,32 @@ export class NousManager {
       trace.setDegradedServices(degradedServices);
     }
 
-    const systemPrompt = [
+    const systemPrompt: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [
       ...bootstrap.staticBlocks,
       ...bootstrap.dynamicBlocks,
     ];
+
+    // Mid-session working state injection — every 8 turns, give the agent a lightweight status pulse
+    const currentSession = this.store.findSessionById(sessionId);
+    const msgCount = currentSession?.messageCount ?? 0;
+    if (msgCount > 0 && msgCount % 8 === 0) {
+      const recentTools = this.store.getRecentToolCalls(sessionId, 6);
+      const elapsed = currentSession?.createdAt
+        ? Math.round((Date.now() - new Date(currentSession.createdAt).getTime()) / 60000)
+        : 0;
+      const utilization = this.config.agents.defaults.contextTokens > 0
+        ? Math.round(((currentSession?.tokenCountEstimate ?? 0) / this.config.agents.defaults.contextTokens) * 100)
+        : 0;
+      systemPrompt.push({
+        type: "text",
+        text:
+          `## Working State — Turn ${msgCount}\n\n` +
+          `Recent tools: ${recentTools.length > 0 ? recentTools.join(", ") : "none"}\n` +
+          `Session duration: ${elapsed} min\n` +
+          `Context utilization: ${utilization}%\n` +
+          `Distillations: ${currentSession?.distillationCount ?? 0}`,
+      });
+    }
 
     const toolDefs = this.tools.getDefinitions({
       sessionId,
@@ -325,7 +350,7 @@ export class NousManager {
     const currentText = crossAgentNotice
       ? crossAgentNotice + "\n\n" + msg.text
       : msg.text;
-    const messages = this.buildMessages(history, currentText, msg.media);
+    const messages = this.buildMessages(history, currentText, msg.media, nous["userTimezone"] as string | undefined);
 
     const toolContext: ToolContext = {
       nousId,
@@ -359,6 +384,7 @@ export class NousManager {
         messages: currentMessages,
         ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
         maxTokens: this.config.agents.defaults.maxOutputTokens,
+        ...(temperature !== undefined ? { temperature } : {}),
       });
 
       totalInputTokens += result.usage.inputTokens;
@@ -619,6 +645,7 @@ export class NousManager {
     history: Message[],
     currentText: string,
     media?: MediaAttachment[],
+    tz?: string,
   ): MessageParam[] {
     const messages: MessageParam[] = [];
 
@@ -628,7 +655,7 @@ export class NousManager {
       if (msg.role === "user") {
         // Ephemeral timestamps — inject absolute time for temporal awareness
         // These exist only in the API call, never stored
-        const ts = formatEphemeralTimestamp(msg.createdAt);
+        const ts = formatEphemeralTimestamp(msg.createdAt, tz);
         const content = ts ? `[${ts}] ${msg.content}` : msg.content;
         messages.push({ role: "user", content });
       } else if (msg.role === "assistant") {
