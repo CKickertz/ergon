@@ -12,12 +12,11 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
-    chunkSizeWarningLimit: 400,
     rollupOptions: {
       output: {
         manualChunks: {
-          hljs: ["highlight.js"],
-          markdown: ["marked", "dompurify"],
+          markdown: ["marked", "dompurify", "highlight.js/lib/core"],
+          graph3d: ["three", "3d-force-graph"],
         },
       },
     },

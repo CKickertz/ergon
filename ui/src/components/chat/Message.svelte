@@ -3,14 +3,16 @@
   import { formatTimestamp } from "../../lib/format";
   import Markdown from "./Markdown.svelte";
 
-  let { message, agentName, onToolClick }: {
+  let { message, agentName, agentEmoji, onToolClick }: {
     message: ChatMessage;
     agentName?: string | null;
+    agentEmoji?: string | null;
     onToolClick?: (tools: ToolCallState[]) => void;
   } = $props();
 
   let isUser = $derived(message.role === "user");
   let initials = $derived(agentName ? agentName.slice(0, 2).toUpperCase() : "AI");
+  let hasMedia = $derived(message.media && message.media.length > 0);
 
   function toolSummary(tools: ToolCallState[]): string {
     const running = tools.filter((t) => t.status === "running").length;
@@ -19,29 +21,65 @@
     if (errors > 0) return `${tools.length} tools (${errors} failed)`;
     return `${tools.length} tool${tools.length === 1 ? "" : "s"} used`;
   }
+
+  let expandedImage = $state<string | null>(null);
+
+  function openLightbox(src: string) {
+    expandedImage = src;
+  }
+
+  function closeLightbox() {
+    expandedImage = null;
+  }
 </script>
 
-<div class="message" class:user={isUser} class:assistant={!isUser}>
-  <div class="avatar" class:user-avatar={isUser} class:agent-avatar={!isUser}>
+<div class="chat-msg" class:user={isUser} class:assistant={!isUser}>
+  <div class="chat-avatar" class:user={isUser} class:agent={!isUser}>
     {#if isUser}
-      <span class="avatar-text">You</span>
+      <span class="chat-avatar-text">You</span>
+    {:else if agentEmoji}
+      <span class="chat-avatar-emoji">{agentEmoji}</span>
     {:else}
-      <span class="avatar-text">{initials}</span>
+      <span class="chat-avatar-text">{initials}</span>
     {/if}
   </div>
-  <div class="body">
+  <div class="chat-body">
     {#if message.toolCalls && message.toolCalls.length > 0}
       <button
-        class="tool-pill"
+        class="chat-tool-pill"
         class:has-error={message.toolCalls.some((t) => t.status === "error")}
         onclick={() => onToolClick?.(message.toolCalls!)}
       >
-        <span class="tool-icon">&#9881;</span>
+        <span class="chat-tool-icon">⚙</span>
         {toolSummary(message.toolCalls)}
       </button>
     {/if}
+    {#if hasMedia}
+      <div class="msg-media" class:single={message.media!.length === 1} class:grid={message.media!.length > 1}>
+        {#each message.media! as item}
+          {#if item.contentType.startsWith("image/")}
+            <button class="media-thumb" onclick={() => openLightbox(`data:${item.contentType};base64,${item.data}`)}>
+              <img
+                src="data:{item.contentType};base64,{item.data}"
+                alt={item.filename ?? "image"}
+              />
+            </button>
+          {:else if item.contentType === "application/pdf"}
+            <div class="file-attachment">
+              <span class="file-att-icon">📄</span>
+              <span class="file-att-name">{item.filename ?? "document.pdf"}</span>
+            </div>
+          {:else}
+            <div class="file-attachment">
+              <span class="file-att-icon">📝</span>
+              <span class="file-att-name">{item.filename ?? "file"}</span>
+            </div>
+          {/if}
+        {/each}
+      </div>
+    {/if}
     {#if message.content}
-      <div class="content">
+      <div class="chat-content">
         {#if isUser}
           <div class="user-text">{message.content}</div>
         {:else}
@@ -53,88 +91,122 @@
   </div>
 </div>
 
+{#if expandedImage}
+  <div class="lightbox" onclick={closeLightbox} onkeydown={(e) => e.key === "Escape" && closeLightbox()} role="dialog" tabindex="-1">
+    <img src={expandedImage} alt="Expanded view" />
+    <button class="lightbox-close" onclick={closeLightbox} aria-label="Close">×</button>
+  </div>
+{/if}
+
 <style>
-  .message {
-    display: flex;
-    gap: 12px;
-    padding: 12px 16px;
-    transition: background 0.15s;
-  }
-  .message:hover {
-    background: rgba(255, 255, 255, 0.02);
-  }
-  .message.assistant {
-    background: rgba(255, 255, 255, 0.01);
-  }
-  .avatar {
-    flex-shrink: 0;
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--border);
-  }
-  .user-avatar {
-    background: var(--surface);
-  }
-  .agent-avatar {
-    background: var(--accent);
-    border-color: var(--accent);
-  }
-  .avatar-text {
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-  }
-  .agent-avatar .avatar-text {
-    color: #fff;
-  }
-  .body {
-    flex: 1;
-    min-width: 0;
-  }
-  .content {
-    margin-top: 2px;
-  }
   .user-text {
     white-space: pre-wrap;
     word-break: break-word;
-  }
-  .tool-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 10px;
-    margin-bottom: 6px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    color: var(--text-secondary);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.15s, border-color 0.15s;
-  }
-  .tool-pill:hover {
-    background: var(--surface-hover);
-    border-color: var(--accent);
-    color: var(--text);
-  }
-  .tool-pill.has-error {
-    border-color: var(--red);
-    color: var(--red);
-  }
-  .tool-icon {
-    font-size: 12px;
-    opacity: 0.7;
   }
   .timestamp {
     font-size: 11px;
     color: var(--text-muted);
     margin-top: 4px;
+  }
+
+  /* Media in messages */
+  .msg-media {
+    margin-bottom: 8px;
+  }
+  .msg-media.single {
+    max-width: 400px;
+  }
+  .msg-media.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 6px;
+    max-width: 500px;
+  }
+  .media-thumb {
+    display: block;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0;
+    overflow: hidden;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .media-thumb:hover {
+    border-color: var(--accent);
+  }
+  .media-thumb img {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 300px;
+    object-fit: contain;
+    background: var(--surface);
+  }
+  .msg-media.grid .media-thumb img {
+    height: 150px;
+    object-fit: cover;
+  }
+
+  /* File attachments */
+  .file-attachment {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .file-att-icon {
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+  .file-att-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  /* Lightbox */
+  .lightbox {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 32px;
+  }
+  .lightbox img {
+    max-width: 90vw;
+    max-height: 90vh;
+    object-fit: contain;
+    border-radius: var(--radius);
+  }
+  .lightbox-close {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    color: #fff;
+    font-size: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .lightbox-close:hover {
+    background: rgba(255, 255, 255, 0.2);
   }
 </style>

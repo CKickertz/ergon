@@ -27,6 +27,12 @@ export interface HistoryMessage {
   toolName?: string;
 }
 
+export interface MediaItem {
+  contentType: string;
+  data: string;
+  filename?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -34,6 +40,7 @@ export interface ChatMessage {
   timestamp: string;
   toolCalls?: ToolCallState[];
   isStreaming?: boolean;
+  media?: MediaItem[];
 }
 
 export interface ToolCallState {
@@ -48,7 +55,7 @@ export type TurnStreamEvent =
   | { type: "turn_start"; sessionId: string; nousId: string }
   | { type: "text_delta"; text: string }
   | { type: "tool_start"; toolName: string; toolId: string }
-  | { type: "tool_result"; toolName: string; result: string; isError: boolean; durationMs: number }
+  | { type: "tool_result"; toolName: string; toolId: string; result: string; isError: boolean; durationMs: number }
   | { type: "turn_complete"; outcome: TurnOutcome }
   | { type: "error"; message: string };
 
@@ -109,6 +116,25 @@ export interface ServiceStatus {
   name: string;
   healthy: boolean;
   message?: string;
+}
+
+export interface GraphNode {
+  id: string;
+  labels: string[];
+  pagerank: number;
+  community: number;
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+  rel_type: string;
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  communities: number;
 }
 
 export interface CostSummary {

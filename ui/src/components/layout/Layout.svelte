@@ -3,11 +3,17 @@
   import Sidebar from "./Sidebar.svelte";
   import ChatView from "../chat/ChatView.svelte";
   import MetricsView from "../metrics/MetricsView.svelte";
+  import GraphView from "../graph/GraphView.svelte";
   import { getToken, setToken } from "../../lib/api";
 
-  let showMetrics = $state(false);
+  type ViewId = "chat" | "metrics" | "graph";
+
+  const SIDEBAR_KEY = "aletheia_sidebar_collapsed";
+
+  let activeView = $state<ViewId>("chat");
   let hasToken = $state(!!getToken());
   let tokenValue = $state("");
+  let sidebarCollapsed = $state(localStorage.getItem(SIDEBAR_KEY) === "true");
 
   function handleTokenSubmit(e: Event) {
     e.preventDefault();
@@ -15,6 +21,18 @@
       setToken(tokenValue.trim());
       hasToken = true;
       location.reload();
+    }
+  }
+
+  function toggleSidebar() {
+    sidebarCollapsed = !sidebarCollapsed;
+    localStorage.setItem(SIDEBAR_KEY, String(sidebarCollapsed));
+  }
+
+  function closeSidebar() {
+    if (window.innerWidth <= 768) {
+      sidebarCollapsed = true;
+      localStorage.setItem(SIDEBAR_KEY, String(sidebarCollapsed));
     }
   }
 </script>
@@ -36,12 +54,22 @@
     </div>
   </div>
 {:else}
-  <TopBar onToggleMetrics={() => showMetrics = !showMetrics} {showMetrics} />
+  <TopBar
+    onSetView={(v) => activeView = v}
+    onToggleSidebar={toggleSidebar}
+    {activeView}
+    {sidebarCollapsed}
+  />
   <div class="main">
-    <Sidebar />
+    <Sidebar collapsed={sidebarCollapsed} onAgentSelect={closeSidebar} />
+    {#if !sidebarCollapsed}
+      <button class="sidebar-overlay" onclick={closeSidebar} aria-label="Close sidebar"></button>
+    {/if}
     <div class="content">
-      {#if showMetrics}
+      {#if activeView === "metrics"}
         <MetricsView />
+      {:else if activeView === "graph"}
+        <GraphView />
       {:else}
         <ChatView />
       {/if}
@@ -55,12 +83,16 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
+    position: relative;
   }
   .content {
     flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
+  }
+  .sidebar-overlay {
+    display: none;
   }
   .token-setup {
     display: flex;
@@ -117,5 +149,21 @@
   }
   .token-submit:hover {
     background: var(--accent-hover);
+  }
+
+  @media (max-width: 768px) {
+    .sidebar-overlay {
+      display: block;
+      position: fixed;
+      inset: 0;
+      top: var(--topbar-height);
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 99;
+      border: none;
+      cursor: default;
+    }
+    .token-card {
+      margin: 0 16px;
+    }
   }
 </style>

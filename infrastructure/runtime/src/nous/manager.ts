@@ -9,6 +9,7 @@ import { assembleBootstrap } from "./bootstrap.js";
 import { detectBootstrapDiff, logBootstrapDiff } from "./bootstrap-diff.js";
 import { distillSession } from "../distillation/pipeline.js";
 import { scoreComplexity, selectModel, selectTemperature, type ComplexityTier } from "../hermeneus/complexity.js";
+import { paths } from "../taxis/paths.js";
 import type { AletheiaConfig } from "../taxis/schema.js";
 import {
   resolveNous,
@@ -33,6 +34,7 @@ import type { UncertaintyTracker } from "./uncertainty.js";
 import { eventBus } from "../koina/event-bus.js";
 import { classifyInteraction } from "./interaction-signals.js";
 import { extractSkillCandidate, saveLearnedSkill, type ToolCallRecord } from "../organon/skill-learner.js";
+import { AsyncChannel } from "./async-channel.js";
 
 const log = createLogger("nous");
 
@@ -71,7 +73,7 @@ export type TurnStreamEvent =
   | { type: "turn_start"; sessionId: string; nousId: string }
   | { type: "text_delta"; text: string }
   | { type: "tool_start"; toolName: string; toolId: string }
-  | { type: "tool_result"; toolName: string; result: string; isError: boolean; durationMs: number }
+  | { type: "tool_result"; toolName: string; toolId: string; result: string; isError: boolean; durationMs: number }
   | { type: "turn_complete"; outcome: TurnOutcome }
   | { type: "error"; message: string };
 
@@ -192,20 +194,31 @@ export class NousManager {
     yield { type: "turn_start", sessionId: session.id, nousId };
 
     this.activeTurns++;
-    try {
-      // Collect events from executeTurnStreaming through session lock
-      // We can't yield directly from withSessionLock, so collect into a buffer
-      const events: TurnStreamEvent[] = [];
-      await withSessionLock(session.id, async () => {
+    const channel = new AsyncChannel<TurnStreamEvent>();
+
+    // Run turn inside session lock, pushing events to channel in real-time
+    const turnPromise = withSessionLock(session.id, async () => {
+      try {
         for await (const event of this.executeTurnStreaming(
           nousId, session.id, sessionKey, model, msg, nous, temperature,
         )) {
-          events.push(event);
+          channel.push(event);
         }
-      });
-      for (const event of events) {
+      } catch (err) {
+        channel.push({
+          type: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        channel.close();
+      }
+    });
+
+    try {
+      for await (const event of channel) {
         yield event;
       }
+      await turnPromise;
     } catch (err) {
       yield { type: "error", message: err instanceof Error ? err.message : String(err) };
     } finally {
@@ -331,7 +344,7 @@ export class NousManager {
     const currentText = crossAgentNotice ? crossAgentNotice + "\n\n" + msg.text : msg.text;
     const messages = this.buildMessages(history, currentText, msg.media, nous["userTimezone"] as string | undefined);
 
-    const toolContext: ToolContext = { nousId, sessionId, workspace, depth: msg.depth ?? 0 };
+    const toolContext: ToolContext = { nousId, sessionId, workspace, allowedRoots: [paths.root], depth: msg.depth ?? 0 };
 
     if (this.plugins) {
       await this.plugins.dispatchBeforeTurn({ nousId, sessionId, messageText: msg.text, ...(msg.media ? { media: msg.media } : {}) });
@@ -345,7 +358,7 @@ export class NousManager {
     let currentMessages = messages;
     const turnToolCalls: ToolCallRecord[] = [];
 
-    const MAX_TOOL_LOOPS = 20;
+    const MAX_TOOL_LOOPS = (nous["maxToolLoops"] as number | undefined) ?? this.config.agents.defaults.maxToolLoops ?? 40;
     for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
       // Stream the completion
       let accumulatedText = "";
@@ -509,6 +522,7 @@ export class NousManager {
         yield {
           type: "tool_result",
           toolName: toolUse.name,
+          toolId: toolUse.id,
           result: toolResult.slice(0, 2000),
           isError,
           durationMs: toolDuration,
@@ -770,6 +784,7 @@ export class NousManager {
       nousId,
       sessionId,
       workspace,
+      allowedRoots: [paths.root],
       depth: msg.depth ?? 0,
     };
 
@@ -790,7 +805,7 @@ export class NousManager {
     let currentMessages = messages;
     const turnToolCalls: ToolCallRecord[] = [];
 
-    const MAX_TOOL_LOOPS = 20;
+    const MAX_TOOL_LOOPS = (nous["maxToolLoops"] as number | undefined) ?? this.config.agents.defaults.maxToolLoops ?? 40;
     for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
       const result = await this.router.complete({
         model,
@@ -1124,31 +1139,100 @@ export class NousManager {
       }
     }
 
-    // Current message — multimodal if images present
-    const imageMedia = media?.filter((m) =>
-      /^image\/(jpeg|png|gif|webp)$/i.test(m.contentType),
-    );
-    if (imageMedia && imageMedia.length > 0) {
+    // Current message — multimodal if media present (images, PDFs, text documents)
+    if (media?.length) {
+      log.info(`buildMessages received ${media.length} media items: ${media.map(m => m.contentType).join(", ")}`);
+    }
+
+    const hasMedia = media && media.length > 0;
+    if (hasMedia) {
       const blocks: UserContentBlock[] = [];
-      for (const img of imageMedia) {
+
+      for (const item of media) {
         // Strip data URI prefix if present
-        let data = img.data;
+        let data = item.data;
         const dataUriMatch = data.match(/^data:[^;]+;base64,(.+)$/);
         if (dataUriMatch) data = dataUriMatch[1]!;
 
-        blocks.push({
-          type: "image",
-          source: {
-            type: "base64",
-            media_type: img.contentType,
-            data,
-          },
-        } as ImageBlock);
+        if (/^image\/(jpeg|png|gif|webp)$/i.test(item.contentType)) {
+          // Image → vision block
+          blocks.push({
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: item.contentType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+              data,
+            },
+          } as ImageBlock);
+        } else if (item.contentType === "application/pdf") {
+          // PDF → document block
+          blocks.push({
+            type: "document",
+            source: {
+              type: "base64",
+              media_type: "application/pdf",
+              data,
+            },
+            ...(item.filename ? { title: item.filename } : {}),
+          } as unknown as UserContentBlock);
+        } else if (item.contentType.startsWith("text/")) {
+          // Text files → decode and include as text block
+          try {
+            const decoded = Buffer.from(data, "base64").toString("utf-8");
+            const label = item.filename ? `[File: ${item.filename}]` : "[Text file]";
+            blocks.push({ type: "text", text: `${label}\n\n${decoded}` });
+          } catch {
+            blocks.push({ type: "text", text: `[Could not decode text file: ${item.filename ?? "unknown"}]` });
+          }
+        } else {
+          // Unknown type — note it for the agent
+          blocks.push({
+            type: "text",
+            text: `[Attachment: ${item.filename ?? "file"} (${item.contentType}) — unsupported for inline viewing]`,
+          });
+        }
       }
+
+      log.info(`Including ${blocks.length} content block(s) from media (${blocks.map(b => b.type).join(", ")})`);
       blocks.push({ type: "text", text: currentText });
       messages.push({ role: "user", content: blocks });
     } else {
       messages.push({ role: "user", content: currentText });
+    }
+
+    // Repair orphaned tool_use blocks — if an assistant message has tool_use but
+    // the next message isn't a user with tool_results, inject synthetic results.
+    // This happens when the service restarts mid-turn before tool execution completes.
+    for (let j = 0; j < messages.length; j++) {
+      const msg = messages[j]!;
+      if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+      const toolUseBlocks = (msg.content as ContentBlock[]).filter(
+        (b): b is ToolUseBlock => b.type === "tool_use",
+      );
+      if (toolUseBlocks.length === 0) continue;
+
+      const next = messages[j + 1];
+      const answeredIds = new Set<string>();
+      if (next?.role === "user" && Array.isArray(next.content)) {
+        for (const block of next.content as UserContentBlock[]) {
+          if ("tool_use_id" in block) answeredIds.add(block.tool_use_id);
+        }
+      }
+      const orphaned = toolUseBlocks.filter((b) => !answeredIds.has(b.id));
+      if (orphaned.length === 0) continue;
+
+      log.warn(`Repairing ${orphaned.length} orphaned tool_use block(s) in history`);
+      const syntheticResults: UserContentBlock[] = orphaned.map((b) => ({
+        type: "tool_result" as const,
+        tool_use_id: b.id,
+        content: "Error: Tool execution interrupted — service restarted mid-turn.",
+      }));
+
+      if (next?.role === "user" && Array.isArray(next.content)) {
+        (next.content as UserContentBlock[]).unshift(...syntheticResults);
+      } else {
+        messages.splice(j + 1, 0, { role: "user", content: syntheticResults });
+      }
     }
 
     // Merge consecutive user messages to prevent Anthropic 400 errors

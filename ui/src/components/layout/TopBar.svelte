@@ -1,14 +1,21 @@
 <script lang="ts">
   import { getConnectionStatus } from "../../stores/connection.svelte";
+  import { getActiveAgent } from "../../stores/agents.svelte";
   import { getToken, setToken, clearToken } from "../../lib/api";
 
-  let { onToggleMetrics, showMetrics }: {
-    onToggleMetrics: () => void;
-    showMetrics: boolean;
+  type ViewId = "chat" | "metrics" | "graph";
+
+  let { onSetView, onToggleSidebar, activeView, sidebarCollapsed = false }: {
+    onSetView: (view: ViewId) => void;
+    onToggleSidebar: () => void;
+    activeView: ViewId;
+    sidebarCollapsed?: boolean;
   } = $props();
 
   let showSettings = $state(false);
   let tokenInput = $state(getToken() ?? "");
+
+  let agent = $derived(getActiveAgent());
 
   function saveToken() {
     if (tokenInput.trim()) {
@@ -26,12 +33,35 @@
 
 <header class="topbar">
   <div class="left">
+    <button
+      class="sidebar-toggle"
+      class:open={!sidebarCollapsed}
+      onclick={onToggleSidebar}
+      aria-label="Toggle sidebar"
+      title={sidebarCollapsed ? "Show agents" : "Hide agents"}
+    >
+      <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+        <rect x="1" y="2" width="16" height="14" rx="2" stroke="currentColor" stroke-width="1.5" fill="none"/>
+        <line x1="6.5" y1="2" x2="6.5" y2="16" stroke="currentColor" stroke-width="1.5"/>
+      </svg>
+    </button>
     <h1 class="title">Aletheia</h1>
     <span class="status-dot" class:connected={getConnectionStatus() === "connected"} class:connecting={getConnectionStatus() === "connecting"}></span>
+    {#if agent}
+      <span class="active-agent">
+        {#if agent.emoji}
+          <span class="agent-emoji">{agent.emoji}</span>
+        {/if}
+        {agent.name}
+      </span>
+    {/if}
   </div>
   <div class="right">
-    <button class="topbar-btn" class:active={showMetrics} onclick={onToggleMetrics}>
+    <button class="topbar-btn" class:active={activeView === "metrics"} onclick={() => onSetView(activeView === "metrics" ? "chat" : "metrics")}>
       Metrics
+    </button>
+    <button class="topbar-btn" class:active={activeView === "graph"} onclick={() => onSetView(activeView === "graph" ? "chat" : "graph")}>
+      Graph
     </button>
     <button class="topbar-btn" onclick={() => showSettings = !showSettings}>
       Settings
@@ -74,6 +104,25 @@
     align-items: center;
     gap: 10px;
   }
+  .sidebar-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+  }
+  .sidebar-toggle:hover {
+    color: var(--text);
+    background: var(--surface);
+  }
+  .sidebar-toggle.open {
+    color: var(--text-secondary);
+  }
   .title {
     font-size: 16px;
     font-weight: 600;
@@ -96,6 +145,14 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }
   }
+  .active-agent {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+  .agent-emoji {
+    font-size: 14px;
+  }
   .right {
     display: flex;
     gap: 4px;
@@ -112,6 +169,10 @@
   .topbar-btn:hover {
     color: var(--text);
     background: var(--surface);
+  }
+  .topbar-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
   .topbar-btn.active {
     color: var(--accent);
