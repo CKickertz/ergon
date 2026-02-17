@@ -149,7 +149,8 @@ async def import_facts(req: ImportRequest, request: Request):
             await asyncio.to_thread(mem.add, text, user_id=req.user_id, metadata=metadata)
             imported += 1
         except Exception as e:
-            errors.append({"index": i, "error": str(e)})
+            logger.debug("facts import error at index %d: %s", i, e)
+            errors.append({"index": i, "error": "Import failed"})
             if len(errors) > 10:
                 break
 
@@ -190,7 +191,7 @@ async def delete_memory(memory_id: str, request: Request):
 
 
 @router.get("/health")
-async def health_check():
+async def health_check(request: Request):
     checks: dict[str, Any] = {}
 
     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -200,18 +201,15 @@ async def health_check():
         except Exception as e:
             checks["qdrant"] = f"error: {e}"
 
-        try:
-            r = await client.post(
-                "https://api.voyageai.com/v1/embeddings",
-                headers={
-                    "Authorization": f"Bearer {os.environ.get('VOYAGE_API_KEY', '')}",
-                    "Content-Type": "application/json",
-                },
-                json={"model": "voyage-3-large", "input": ["health check"]},
-            )
-            checks["voyage"] = "ok" if r.status_code == 200 else f"status {r.status_code}"
-        except Exception as e:
-            checks["voyage"] = f"error: {e}"
+    try:
+        mem = request.app.state.memory
+        if mem and hasattr(mem, "embedding_model"):
+            vec = mem.embedding_model.embed("health check")
+            checks["embedder"] = "ok" if len(vec) > 0 else "empty vector"
+        else:
+            checks["embedder"] = "not initialized"
+    except Exception as e:
+        checks["embedder"] = f"error: {e}"
 
     try:
         from neo4j import GraphDatabase
@@ -686,7 +684,8 @@ def _log_retraction(req: RetractRequest, retracted: list[dict[str, Any]], neo4j_
     }
     with open(RETRACTION_LOG, "a") as f:
         f.write(json.dumps(entry) + "\n")
-    logger.info(f"Retraction logged: {len(retracted)} memories, reason={req.reason or 'none'}")
+    safe_reason = (req.reason or "none").replace("\n", " ").replace("\r", " ")[:100]
+    logger.info("Retraction logged: %d memories, reason=%s", len(retracted), safe_reason)
 
 
 # --- Episode recording (linked from /add) ---
@@ -819,7 +818,7 @@ async def active_foresight():
         return {"ok": True, "signals": signals}
     except Exception as e:
         logger.exception("active_foresight failed")
-        return {"ok": True, "signals": [], "error": str(e)}
+        return {"ok": True, "signals": [], "error": "Internal error"}
 
 
 @foresight_router.post("/decay")

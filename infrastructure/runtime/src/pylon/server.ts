@@ -2,7 +2,7 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { timingSafeEqual } from "node:crypto";
-import { createLogger } from "../koina/logger.js";
+import { createLogger, withTurnAsync } from "../koina/logger.js";
 import type { NousManager } from "../nous/manager.js";
 import type { SessionStore } from "../mneme/store.js";
 import type { AletheiaConfig } from "../taxis/schema.js";
@@ -105,7 +105,7 @@ export function createGateway(
   const authToken = config.gateway.auth.token;
 
   app.use("*", async (c, next) => {
-    if (c.req.path === "/health" || c.req.path.startsWith("/ui")) return next();
+    if (c.req.path === "/health" || c.req.path === "/api/branding" || c.req.path.startsWith("/ui")) return next();
 
     if (authMode === "token" && authToken) {
       const header = c.req.header("Authorization");
@@ -119,7 +119,7 @@ export function createGateway(
     } else if (authMode === "password" && authToken) {
       const header = c.req.header("Authorization");
       if (!header?.startsWith("Basic ")) {
-        c.header("WWW-Authenticate", 'Basic realm="Aletheia"');
+        c.header("WWW-Authenticate", `Basic realm="${config.branding?.name ?? "Aletheia"}"`);
         return c.json({ error: "Unauthorized" }, 401);
       }
       const decoded = Buffer.from(header.slice(6), "base64").toString();
@@ -184,12 +184,15 @@ export function createGateway(
     }
 
     try {
-      const result = await manager.handleMessage({
-        text: message,
-        nousId: agentId,
-        sessionKey: sessionKey ?? "main",
-        ...(media?.length ? { media } : {}),
-      });
+      const result = await withTurnAsync(
+        { channel: "api", nousId: agentId, sessionKey: sessionKey ?? "main" },
+        () => manager.handleMessage({
+          text: message,
+          nousId: agentId,
+          sessionKey: sessionKey ?? "main",
+          ...(media?.length ? { media } : {}),
+        }),
+      );
       return c.json({
         response: result.text,
         sessionId: result.sessionId,
@@ -257,26 +260,44 @@ export function createGateway(
     }
 
     const encoder = new TextEncoder();
+    const resolvedSessionKey = sessionKey ?? "main";
+    const requestSignal = c.req.raw.signal;
+    let activeTurnId: string | null = null;
+
     const stream = new ReadableStream({
       async start(controller) {
-        try {
-          for await (const event of manager.handleMessageStreaming({
-            text: message,
-            nousId: agentId,
-            sessionKey: sessionKey ?? "main",
-            ...(validMedia.length > 0 ? { media: validMedia } : {}),
-          })) {
-            const payload = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
-            controller.enqueue(encoder.encode(payload));
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.error(`Stream error: ${msg}`);
-          const payload = `event: error\ndata: ${JSON.stringify({ type: "error", message: "Internal error" })}\n\n`;
-          controller.enqueue(encoder.encode(payload));
-        } finally {
-          controller.close();
-        }
+        await withTurnAsync(
+          { channel: "webchat", nousId: agentId, sessionKey: resolvedSessionKey },
+          async () => {
+            try {
+              for await (const event of manager.handleMessageStreaming({
+                text: message,
+                nousId: agentId,
+                sessionKey: resolvedSessionKey,
+                ...(validMedia.length > 0 ? { media: validMedia } : {}),
+              })) {
+                if (event.type === "turn_start") {
+                  activeTurnId = event.turnId;
+                  requestSignal?.addEventListener("abort", () => {
+                    if (activeTurnId) {
+                      manager.abortTurn(activeTurnId);
+                      activeTurnId = null;
+                    }
+                  }, { once: true });
+                }
+                const payload = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+                controller.enqueue(encoder.encode(payload));
+              }
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              log.error(`Stream error: ${msg}`);
+              const payload = `event: error\ndata: ${JSON.stringify({ type: "error", message: "Internal error" })}\n\n`;
+              controller.enqueue(encoder.encode(payload));
+            } finally {
+              controller.close();
+            }
+          },
+        );
       },
     });
 
@@ -317,12 +338,17 @@ export function createGateway(
         emoji: parsedEmoji,
       });
     } catch {
+      // IDENTITY.md not found — fall back to config identity
       return c.json({
         id: agent.id,
-        name: agent.name ?? agent.id,
-        emoji: null,
+        name: agent.identity?.name ?? agent.name ?? agent.id,
+        emoji: agent.identity?.emoji ?? null,
       });
     }
+  });
+
+  app.get("/api/branding", (c) => {
+    return c.json(config.branding ?? { name: "Aletheia" });
   });
 
   app.get("/api/config", (c) => {
@@ -334,7 +360,21 @@ export function createGateway(
       })),
       bindings: config.bindings.length,
       plugins: Object.keys(config.plugins.entries).length,
+      branding: config.branding,
     });
+  });
+
+  // --- Turn management ---
+
+  app.get("/api/turns/active", (c) => {
+    return c.json({ turns: manager.getActiveTurnDetails() });
+  });
+
+  app.post("/api/turns/:id/abort", (c) => {
+    const id = c.req.param("id");
+    const aborted = manager.abortTurn(id);
+    if (!aborted) return c.json({ error: "Turn not found or already completed" }, 404);
+    return c.json({ ok: true, turnId: id });
   });
 
   // --- Admin API ---
@@ -581,6 +621,56 @@ export function createGateway(
       body,
     });
     return c.json(await res.json(), res.status as 200);
+  });
+
+  // --- Export / Analytics API ---
+
+  app.get("/api/export/stats", (c) => {
+    const nousId = c.req.query("nousId");
+    const since = c.req.query("since");
+    const stats = store.getExportStats({
+      ...(nousId ? { nousId } : {}),
+      ...(since ? { since } : {}),
+    });
+    return c.json(stats);
+  });
+
+  app.get("/api/export/sessions", (c) => {
+    const nousId = c.req.query("nousId");
+    const since = c.req.query("since");
+    const until = c.req.query("until");
+    const sessions = store.listSessionsFiltered({
+      ...(nousId ? { nousId } : {}),
+      ...(since ? { since } : {}),
+      ...(until ? { until } : {}),
+    });
+    return c.json({ sessions });
+  });
+
+  app.get("/api/export/sessions/:id", (c) => {
+    const id = c.req.param("id");
+    const session = store.findSessionById(id);
+    if (!session) return c.json({ error: "Session not found" }, 404);
+
+    const messages = store.getHistory(id, { excludeDistilled: false });
+    const usage = store.getUsageForSession(id);
+
+    // Stream as JSONL
+    const lines: string[] = [];
+    lines.push(JSON.stringify({ type: "session", ...session }));
+    for (const m of messages) {
+      lines.push(JSON.stringify({ type: "message", seq: m.seq, role: m.role, content: m.content, isDistilled: m.isDistilled, toolName: m.toolName ?? null, tokenEstimate: m.tokenEstimate ?? null, createdAt: m.createdAt }));
+    }
+    for (const u of usage) {
+      lines.push(JSON.stringify({ type: "usage", turnSeq: u.turnSeq, inputTokens: u.inputTokens, outputTokens: u.outputTokens, model: u.model, createdAt: u.createdAt }));
+    }
+
+    return new Response(lines.join("\n") + "\n", {
+      headers: {
+        "Content-Type": "application/x-ndjson",
+        "Content-Disposition": `attachment; filename="${id}.jsonl"`,
+      },
+    });
   });
 
   // Blackboard API — for prosoche and external systems to post broadcasts
