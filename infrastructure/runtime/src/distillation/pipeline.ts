@@ -10,6 +10,7 @@ import { sanitizeToolResults, summarizeInStages } from "./chunked-summarize.js";
 import { pruneBySimilarity } from "./similarity-pruning.js";
 import type { PluginRegistry } from "../prostheke/registry.js";
 import { eventBus } from "../koina/event-bus.js";
+import { flushToWorkspace } from "./workspace-flush.js";
 
 const log = createLogger("distillation");
 
@@ -23,6 +24,9 @@ export interface DistillationOpts {
   summaryModel: string;
   memoryTarget?: MemoryFlushTarget;
   plugins?: PluginRegistry;
+  preserveRecentMessages?: number;
+  preserveRecentMaxTokens?: number;
+  workspace?: string;
 }
 
 export interface DistillationResult {
@@ -102,6 +106,31 @@ async function runDistillation(
     );
   }
 
+  // Split into messages to distill vs recent messages to preserve as raw context
+  const preserveCount = opts.preserveRecentMessages ?? 0;
+  const preserveMaxTokens = opts.preserveRecentMaxTokens ?? 4000;
+  let toPreserve: typeof undistilled = [];
+  let toDistill = undistilled;
+
+  if (preserveCount > 0 && undistilled.length > preserveCount + opts.minMessages) {
+    let preserveTokens = 0;
+    const candidates = undistilled.slice(-preserveCount);
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      if (preserveTokens + (candidates[i]!.tokenEstimate ?? 0) > preserveMaxTokens) break;
+      preserveTokens += candidates[i]!.tokenEstimate ?? 0;
+      toPreserve.unshift(candidates[i]!);
+    }
+    if (undistilled.length - toPreserve.length >= opts.minMessages) {
+      toDistill = undistilled.slice(0, undistilled.length - toPreserve.length);
+    } else {
+      toPreserve = [];
+    }
+  }
+
+  if (toPreserve.length > 0) {
+    log.info(`Preserving ${toPreserve.length} recent messages alongside summary`);
+  }
+
   const tokensBefore = undistilled.reduce(
     (sum, m) => sum + (m.tokenEstimate ?? 0),
     0,
@@ -116,8 +145,8 @@ async function runDistillation(
     });
   }
 
-  // Build simple messages, including tool_result content for factual preservation
-  const rawMessages = undistilled
+  // Build simple messages from toDistill (preserved messages stay as raw context)
+  const rawMessages = toDistill
     .filter(
       (m) =>
         m.role === "user" || m.role === "assistant" || m.role === "tool_result",
@@ -215,26 +244,41 @@ async function runDistillation(
 
   store.markMessagesDistilled(
     sessionId,
-    undistilled.map((m) => m.seq),
+    toDistill.map((m) => m.seq),
   );
 
+  const preservedTokens = toPreserve.reduce((sum, m) => sum + (m.tokenEstimate ?? 0), 0);
   store.recordDistillation({
     sessionId,
     messagesBefore: undistilled.length,
-    messagesAfter: 1,
+    messagesAfter: 1 + toPreserve.length,
     tokensBefore,
-    tokensAfter: markedTokens,
+    tokensAfter: markedTokens + preservedTokens,
     factsExtracted: extraction.facts.length + extraction.decisions.length,
     model: opts.extractionModel,
   });
+
+  if (opts.workspace) {
+    const flushResult = flushToWorkspace({
+      workspace: opts.workspace,
+      nousId,
+      sessionId,
+      distillationNumber,
+      summary: markedSummary,
+      extraction,
+    });
+    if (!flushResult.written) {
+      log.warn(`Workspace memory flush failed: ${flushResult.error}`);
+    }
+  }
 
   const result: DistillationResult = {
     sessionId,
     nousId,
     messagesBefore: undistilled.length,
-    messagesAfter: 1,
+    messagesAfter: 1 + toPreserve.length,
     tokensBefore,
-    tokensAfter: markedTokens,
+    tokensAfter: markedTokens + preservedTokens,
     factsExtracted: extraction.facts.length + extraction.decisions.length,
     summary: markedSummary,
     distillationNumber,

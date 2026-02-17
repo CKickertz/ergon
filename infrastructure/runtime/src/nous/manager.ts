@@ -1,6 +1,6 @@
 // Nous manager — lifecycle, routing, agent turn execution
 import { join } from "node:path";
-import { createLogger } from "../koina/logger.js";
+import { createLogger, updateTurnContext } from "../koina/logger.js";
 import { SessionStore, type Message } from "../mneme/store.js";
 import { ProviderRouter } from "../hermeneus/router.js";
 import { estimateTokens, estimateToolDefTokens } from "../hermeneus/token-counter.js";
@@ -33,8 +33,11 @@ import type { CompetenceModel } from "./competence.js";
 import type { UncertaintyTracker } from "./uncertainty.js";
 import { eventBus } from "../koina/event-bus.js";
 import { classifyInteraction } from "./interaction-signals.js";
+import { LoopDetector } from "./loop-detector.js";
 import { extractSkillCandidate, saveLearnedSkill, type ToolCallRecord } from "../organon/skill-learner.js";
 import { AsyncChannel } from "./async-channel.js";
+import { recallMemories } from "./recall.js";
+import { executeWithTimeout, resolveTimeout, ToolTimeoutError } from "../organon/timeout.js";
 
 const log = createLogger("nous");
 
@@ -70,11 +73,12 @@ export interface TurnOutcome {
 }
 
 export type TurnStreamEvent =
-  | { type: "turn_start"; sessionId: string; nousId: string }
+  | { type: "turn_start"; sessionId: string; nousId: string; turnId: string }
   | { type: "text_delta"; text: string }
   | { type: "tool_start"; toolName: string; toolId: string }
   | { type: "tool_result"; toolName: string; toolId: string; result: string; isError: boolean; durationMs: number }
   | { type: "turn_complete"; outcome: TurnOutcome }
+  | { type: "turn_abort"; reason: string }
   | { type: "error"; message: string };
 
 // Per-session mutex to prevent concurrent turns from corrupting context
@@ -120,6 +124,9 @@ export class NousManager {
   competence?: CompetenceModel;
   uncertainty?: UncertaintyTracker;
   activeTurns = 0;
+  private activeTurnsByNous = new Map<string, number>();
+  private turnAbortControllers = new Map<string, AbortController>();
+  private turnMeta = new Map<string, { nousId: string; sessionId: string; startedAt: number }>();
   isDraining: () => boolean = () => false;
 
   constructor(
@@ -151,6 +158,29 @@ export class NousManager {
 
   setUncertainty(tracker: UncertaintyTracker): void {
     this.uncertainty = tracker;
+  }
+
+  getActiveTurnsByNous(): Record<string, number> {
+    const result: Record<string, number> = {};
+    for (const [nousId, count] of this.activeTurnsByNous) {
+      if (count > 0) result[nousId] = count;
+    }
+    return result;
+  }
+
+  getActiveTurnDetails(): Array<{ turnId: string; nousId: string; sessionId: string; startedAt: number }> {
+    const details: Array<{ turnId: string; nousId: string; sessionId: string; startedAt: number }> = [];
+    for (const [turnId, meta] of this.turnMeta) {
+      details.push({ turnId, ...meta });
+    }
+    return details;
+  }
+
+  abortTurn(turnId: string): boolean {
+    const controller = this.turnAbortControllers.get(turnId);
+    if (!controller) return false;
+    controller.abort();
+    return true;
   }
 
   async *handleMessageStreaming(msg: InboundMessage): AsyncGenerator<TurnStreamEvent> {
@@ -191,9 +221,14 @@ export class NousManager {
     }
 
     const session = this.store.findOrCreateSession(nousId, sessionKey, model, msg.parentSessionId);
-    yield { type: "turn_start", sessionId: session.id, nousId };
+    const turnId = `${nousId}:${session.id}:${Date.now()}`;
+    const turnAbortController = new AbortController();
+    this.turnAbortControllers.set(turnId, turnAbortController);
+    this.turnMeta.set(turnId, { nousId, sessionId: session.id, startedAt: Date.now() });
+    yield { type: "turn_start", sessionId: session.id, nousId, turnId };
 
     this.activeTurns++;
+    this.activeTurnsByNous.set(nousId, (this.activeTurnsByNous.get(nousId) ?? 0) + 1);
     const channel = new AsyncChannel<TurnStreamEvent>();
 
     // Run turn inside session lock, pushing events to channel in real-time
@@ -201,6 +236,7 @@ export class NousManager {
       try {
         for await (const event of this.executeTurnStreaming(
           nousId, session.id, sessionKey, model, msg, nous, temperature,
+          turnAbortController.signal,
         )) {
           channel.push(event);
         }
@@ -223,6 +259,11 @@ export class NousManager {
       yield { type: "error", message: err instanceof Error ? err.message : String(err) };
     } finally {
       this.activeTurns--;
+      const cur = this.activeTurnsByNous.get(nousId) ?? 1;
+      if (cur <= 1) this.activeTurnsByNous.delete(nousId);
+      else this.activeTurnsByNous.set(nousId, cur - 1);
+      this.turnAbortControllers.delete(turnId);
+      this.turnMeta.delete(turnId);
     }
   }
 
@@ -234,6 +275,7 @@ export class NousManager {
     msg: InboundMessage,
     nous: ReturnType<typeof resolveNous>,
     temperature?: number,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<TurnStreamEvent> {
     if (!nous) throw new Error(`Unknown nous: ${nousId}`);
 
@@ -251,6 +293,7 @@ export class NousManager {
       return;
     }
 
+    updateTurnContext({ nousId, sessionId, sessionKey });
     eventBus.emit("turn:before", { nousId, sessionId, sessionKey, channel: msg.channel });
     log.info(`Processing streaming message for ${nousId}:${sessionKey} (session ${sessionId})`);
 
@@ -276,10 +319,27 @@ export class NousManager {
     trace.setBootstrap(Object.keys(bootstrap.fileHashes), bootstrap.totalTokens);
     if (degradedServices.length > 0) trace.setDegradedServices(degradedServices);
 
+    // Pre-turn memory recall
+    let recallBlock: { type: "text"; text: string } | null = null;
+    let recallTokens = 0;
+    if (!degradedServices.includes("mem0-sidecar")) {
+      const recall = await recallMemories(msg.text, nousId);
+      recallBlock = recall.block;
+      recallTokens = recall.tokens;
+      if (recall.count > 0) {
+        log.info(`Recalled ${recall.count} memories for ${nousId} (${recall.durationMs}ms, ~${recall.tokens} tokens)`);
+        trace.setRecall(recall.count, recall.durationMs);
+      }
+    }
+
     const systemPrompt: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [
       ...bootstrap.staticBlocks,
       ...bootstrap.dynamicBlocks,
     ];
+
+    if (recallBlock) {
+      systemPrompt.push(recallBlock);
+    }
 
     const broadcasts = this.store.blackboardReadPrefix("broadcast:");
     if (broadcasts.length > 0) {
@@ -320,7 +380,7 @@ export class NousManager {
     const toolDefTokens = estimateToolDefTokens(toolDefs);
     const contextTokens = this.config.agents.defaults.contextTokens;
     const maxOutput = this.config.agents.defaults.maxOutputTokens;
-    const historyBudget = Math.max(0, contextTokens - bootstrap.totalTokens - toolDefTokens - maxOutput);
+    const historyBudget = Math.max(0, contextTokens - bootstrap.totalTokens - toolDefTokens - maxOutput - recallTokens);
     const history = this.store.getHistoryWithBudget(sessionId, historyBudget);
 
     let crossAgentNotice: string | null = null;
@@ -344,7 +404,10 @@ export class NousManager {
     const currentText = crossAgentNotice ? crossAgentNotice + "\n\n" + msg.text : msg.text;
     const messages = this.buildMessages(history, currentText, msg.media, nous["userTimezone"] as string | undefined);
 
-    const toolContext: ToolContext = { nousId, sessionId, workspace, allowedRoots: [paths.root], depth: msg.depth ?? 0 };
+    const toolContext: ToolContext = {
+      nousId, sessionId, workspace, allowedRoots: [paths.root], depth: msg.depth ?? 0,
+      ...(abortSignal ? { signal: abortSignal } : {}),
+    };
 
     if (this.plugins) {
       await this.plugins.dispatchBeforeTurn({ nousId, sessionId, messageText: msg.text, ...(msg.media ? { media: msg.media } : {}) });
@@ -357,9 +420,11 @@ export class NousManager {
     let totalCacheWriteTokens = 0;
     let currentMessages = messages;
     const turnToolCalls: ToolCallRecord[] = [];
+    const loopDetector = new LoopDetector();
 
-    const MAX_TOOL_LOOPS = (nous["maxToolLoops"] as number | undefined) ?? this.config.agents.defaults.maxToolLoops ?? 40;
-    for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
+    // No hard cap — the LoopDetector handles actual repetitive patterns.
+    // The loop exits naturally when the model produces a text-only response (no tool_use).
+    for (let loop = 0; ; loop++) {
       // Stream the completion
       let accumulatedText = "";
       let streamResult: import("../hermeneus/anthropic.js").TurnResult | null = null;
@@ -476,6 +541,9 @@ export class NousManager {
             await distillSession(this.store, this.router, sessionId, nousId, {
               triggerThreshold: distillThreshold, minMessages: 10,
               extractionModel: distillModel, summaryModel: distillModel,
+              preserveRecentMessages: compaction.preserveRecentMessages,
+              preserveRecentMaxTokens: compaction.preserveRecentMaxTokens,
+              ...(workspace ? { workspace } : {}),
               ...(this.plugins ? { plugins: this.plugins } : {}),
             });
           }
@@ -499,8 +567,25 @@ export class NousManager {
 
       // Execute tools
       const toolResults: UserContentBlock[] = [];
-      for (const toolUse of toolUses) {
+      for (let toolIdx = 0; toolIdx < toolUses.length; toolIdx++) {
+        const toolUse = toolUses[toolIdx]!;
         totalToolCalls++;
+
+        // Check for abort before executing this tool
+        if (abortSignal?.aborted) {
+          for (const remaining of toolUses.slice(toolIdx)) {
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: remaining.id,
+              content: "[CANCELLED] Turn aborted by user.",
+              is_error: true,
+            });
+          }
+          currentMessages = [...currentMessages, { role: "user" as const, content: toolResults }];
+          yield { type: "turn_abort", reason: "user" };
+          return;
+        }
+
         const reversibility = getReversibility(toolUse.name);
         const needsSim = requiresSimulation(toolUse.name, toolUse.input as Record<string, unknown>);
 
@@ -508,13 +593,23 @@ export class NousManager {
         let isError = false;
         const toolStart = Date.now();
         try {
-          toolResult = await this.tools.execute(toolUse.name, toolUse.input, toolContext);
+          const timeoutMs = resolveTimeout(toolUse.name, this.config.agents.defaults.toolTimeouts);
+          toolResult = await executeWithTimeout(
+            () => this.tools.execute(toolUse.name, toolUse.input, toolContext),
+            timeoutMs,
+            toolUse.name,
+          );
         } catch (err) {
           isError = true;
-          toolResult = err instanceof Error ? err.message : String(err);
-          if (this.competence) {
-            const domain = sessionKey === "main" ? "general" : sessionKey.split(":")[0] ?? "general";
-            this.competence.recordCorrection(nousId, domain);
+          if (err instanceof ToolTimeoutError) {
+            toolResult = `[TIMEOUT] Tool "${toolUse.name}" did not respond within ${Math.round(err.timeoutMs / 1000)}s. The operation may still be running in the background.`;
+            log.warn(`Tool timeout: ${toolUse.name} after ${err.timeoutMs}ms [${nousId}]`);
+          } else {
+            toolResult = err instanceof Error ? err.message : String(err);
+            if (this.competence) {
+              const domain = sessionKey === "main" ? "general" : sessionKey.split(":")[0] ?? "general";
+              this.competence.recordCorrection(nousId, domain);
+            }
           }
         }
         const toolDuration = Date.now() - toolStart;
@@ -550,12 +645,31 @@ export class NousManager {
         this.store.appendMessage(sessionId, "tool_result", toolResult, {
           toolCallId: toolUse.id, toolName: toolUse.name, tokenEstimate: estimateTokens(toolResult),
         });
+
+        // Check for repetitive tool call patterns
+        const loopCheck = loopDetector.record(toolUse.name, toolUse.input, isError);
+        if (loopCheck.verdict === "halt") {
+          // Inject halt notice and stop
+          toolResults.push({
+            type: "tool_result", tool_use_id: toolUse.id,
+            content: `[LOOP DETECTED — HALTING] ${loopCheck.reason}`,
+            is_error: true,
+          });
+          currentMessages = [...currentMessages, { role: "user" as const, content: toolResults }];
+          yield { type: "error", message: loopCheck.reason ?? "Tool loop detected" };
+          return;
+        }
+        if (loopCheck.verdict === "warn") {
+          // Inject warning as an additional tool result so the model sees it
+          toolResults.push({
+            type: "tool_result", tool_use_id: toolUse.id,
+            content: `[WARNING: Possible loop detected] ${loopCheck.reason}`,
+          });
+        }
       }
 
       currentMessages = [...currentMessages, { role: "user" as const, content: toolResults }];
     }
-
-    yield { type: "error", message: "Max tool loops exceeded" };
   }
 
   async handleMessage(msg: InboundMessage): Promise<TurnOutcome> {
@@ -605,12 +719,16 @@ export class NousManager {
 
     // Serialize concurrent turns on the same session
     this.activeTurns++;
+    this.activeTurnsByNous.set(nousId, (this.activeTurnsByNous.get(nousId) ?? 0) + 1);
     try {
       return await withSessionLock(session.id, () =>
         this.executeTurn(nousId, session.id, sessionKey, model, msg, nous, temperature),
       );
     } finally {
       this.activeTurns--;
+      const cur = this.activeTurnsByNous.get(nousId) ?? 1;
+      if (cur <= 1) this.activeTurnsByNous.delete(nousId);
+      else this.activeTurnsByNous.set(nousId, cur - 1);
     }
   }
 
@@ -648,6 +766,7 @@ export class NousManager {
       };
     }
 
+    updateTurnContext({ nousId, sessionId, sessionKey });
     eventBus.emit("turn:before", { nousId, sessionId, sessionKey, channel: msg.channel });
 
     log.info(
@@ -689,10 +808,27 @@ export class NousManager {
       trace.setDegradedServices(degradedServices);
     }
 
+    // Pre-turn memory recall
+    let recallBlock: { type: "text"; text: string } | null = null;
+    let recallTokens = 0;
+    if (!degradedServices.includes("mem0-sidecar")) {
+      const recall = await recallMemories(msg.text, nousId);
+      recallBlock = recall.block;
+      recallTokens = recall.tokens;
+      if (recall.count > 0) {
+        log.info(`Recalled ${recall.count} memories for ${nousId} (${recall.durationMs}ms, ~${recall.tokens} tokens)`);
+        trace.setRecall(recall.count, recall.durationMs);
+      }
+    }
+
     const systemPrompt: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [
       ...bootstrap.staticBlocks,
       ...bootstrap.dynamicBlocks,
     ];
+
+    if (recallBlock) {
+      systemPrompt.push(recallBlock);
+    }
 
     // Broadcast injection — prosoche and agents can post attention-worthy items via blackboard
     const broadcasts = this.store.blackboardReadPrefix("broadcast:");
@@ -740,7 +876,7 @@ export class NousManager {
 
     const contextTokens = this.config.agents.defaults.contextTokens;
     const maxOutput = this.config.agents.defaults.maxOutputTokens;
-    const historyBudget = Math.max(0, contextTokens - bootstrap.totalTokens - toolDefTokens - maxOutput);
+    const historyBudget = Math.max(0, contextTokens - bootstrap.totalTokens - toolDefTokens - maxOutput - recallTokens);
 
     const history = this.store.getHistoryWithBudget(sessionId, historyBudget);
 
@@ -804,9 +940,10 @@ export class NousManager {
     let totalCacheWriteTokens = 0;
     let currentMessages = messages;
     const turnToolCalls: ToolCallRecord[] = [];
+    const loopDetector = new LoopDetector();
 
-    const MAX_TOOL_LOOPS = (nous["maxToolLoops"] as number | undefined) ?? this.config.agents.defaults.maxToolLoops ?? 40;
-    for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
+    // No hard cap — the LoopDetector handles actual repetitive patterns.
+    for (let loop = 0; ; loop++) {
       const result = await this.router.complete({
         model,
         system: systemPrompt,
@@ -952,6 +1089,9 @@ export class NousManager {
               minMessages: 10,
               extractionModel: distillModel,
               summaryModel: distillModel,
+              preserveRecentMessages: compaction.preserveRecentMessages,
+              preserveRecentMaxTokens: compaction.preserveRecentMaxTokens,
+              ...(workspace ? { workspace } : {}),
               ...(this.plugins ? { plugins: this.plugins } : {}),
             });
           }
@@ -979,7 +1119,8 @@ export class NousManager {
       ];
 
       const toolResults: UserContentBlock[] = [];
-      for (const toolUse of toolUses) {
+      for (let toolIdx = 0; toolIdx < toolUses.length; toolIdx++) {
+        const toolUse = toolUses[toolIdx]!;
         totalToolCalls++;
         const reversibility = getReversibility(toolUse.name);
         const needsSim = requiresSimulation(toolUse.name, toolUse.input as Record<string, unknown>);
@@ -993,19 +1134,24 @@ export class NousManager {
         let isError = false;
         const toolStart = Date.now();
         try {
-          toolResult = await this.tools.execute(
+          const timeoutMs = resolveTimeout(toolUse.name, this.config.agents.defaults.toolTimeouts);
+          toolResult = await executeWithTimeout(
+            () => this.tools.execute(toolUse.name, toolUse.input, toolContext),
+            timeoutMs,
             toolUse.name,
-            toolUse.input,
-            toolContext,
           );
         } catch (err) {
           isError = true;
-          toolResult = err instanceof Error ? err.message : String(err);
-          log.warn(`Tool ${toolUse.name} failed: ${toolResult}`);
-          // Record tool failure in competence model
-          if (this.competence) {
-            const domain = sessionKey === "main" ? "general" : sessionKey.split(":")[0] ?? "general";
-            this.competence.recordCorrection(nousId, domain);
+          if (err instanceof ToolTimeoutError) {
+            toolResult = `[TIMEOUT] Tool "${toolUse.name}" did not respond within ${Math.round(err.timeoutMs / 1000)}s. The operation may still be running in the background.`;
+            log.warn(`Tool timeout: ${toolUse.name} after ${err.timeoutMs}ms [${nousId}]`);
+          } else {
+            toolResult = err instanceof Error ? err.message : String(err);
+            log.warn(`Tool ${toolUse.name} failed: ${toolResult}`);
+            if (this.competence) {
+              const domain = sessionKey === "main" ? "general" : sessionKey.split(":")[0] ?? "general";
+              this.competence.recordCorrection(nousId, domain);
+            }
           }
         }
         const toolDuration = Date.now() - toolStart;
@@ -1039,6 +1185,25 @@ export class NousManager {
           toolName: toolUse.name,
           tokenEstimate: estimateTokens(toolResult),
         });
+
+        // Check for repetitive tool call patterns
+        const loopCheck = loopDetector.record(toolUse.name, toolUse.input, isError);
+        if (loopCheck.verdict === "halt") {
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: `[LOOP DETECTED — HALTING] ${loopCheck.reason}`,
+            is_error: true,
+          });
+          throw new Error(loopCheck.reason ?? "Tool loop detected");
+        }
+        if (loopCheck.verdict === "warn") {
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: `[WARNING: Possible loop detected] ${loopCheck.reason}`,
+          });
+        }
       }
 
       currentMessages = [
@@ -1049,8 +1214,6 @@ export class NousManager {
         },
       ];
     }
-
-    throw new Error("Max tool loops exceeded");
   }
 
   private resolveNousId(msg: InboundMessage): string {
@@ -1264,12 +1427,18 @@ export class NousManager {
     const session = this.store.findSessionById(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
 
+    const nous = resolveNous(this.config, session.nousId);
+    const workspace = nous ? resolveWorkspace(this.config, nous) : undefined;
+
     log.info(`Manual distillation triggered for session ${sessionId}`);
     await distillSession(this.store, this.router, sessionId, session.nousId, {
       triggerThreshold: distillThreshold,
       minMessages: 4,
       extractionModel: distillModel,
       summaryModel: distillModel,
+      preserveRecentMessages: compaction.preserveRecentMessages,
+      preserveRecentMaxTokens: compaction.preserveRecentMaxTokens,
+      ...(workspace ? { workspace } : {}),
       ...(this.plugins ? { plugins: this.plugins } : {}),
     });
   }

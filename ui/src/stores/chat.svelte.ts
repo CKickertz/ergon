@@ -5,6 +5,7 @@ import type { ChatMessage, ToolCallState, HistoryMessage, MediaItem } from "../l
 interface AgentChatState {
   messages: ChatMessage[];
   isStreaming: boolean;
+  remoteStreaming: boolean;
   streamingText: string;
   activeToolCalls: ToolCallState[];
   error: string | null;
@@ -16,6 +17,7 @@ let states = $state<Record<string, AgentChatState>>({});
 const EMPTY: AgentChatState = {
   messages: [],
   isStreaming: false,
+  remoteStreaming: false,
   streamingText: "",
   activeToolCalls: [],
   error: null,
@@ -33,6 +35,7 @@ function writeState(agentId: string): AgentChatState {
     states[agentId] = {
       messages: [],
       isStreaming: false,
+      remoteStreaming: false,
       streamingText: "",
       activeToolCalls: [],
       error: null,
@@ -47,7 +50,12 @@ export function getMessages(agentId: string): ChatMessage[] {
 }
 
 export function getIsStreaming(agentId: string): boolean {
-  return readState(agentId).isStreaming;
+  const s = readState(agentId);
+  return s.isStreaming || s.remoteStreaming;
+}
+
+export function setRemoteStreaming(agentId: string, active: boolean): void {
+  writeState(agentId).remoteStreaming = active;
 }
 
 export function getStreamingText(agentId: string): string {
@@ -122,10 +130,17 @@ export async function sendMessage(
   state.activeToolCalls = [];
   state.abortController = new AbortController();
 
+  let needsTextSeparator = false;
+
   try {
     for await (const event of streamMessage(agentId, text, sessionKey, state.abortController!.signal, media)) {
       switch (event.type) {
         case "text_delta":
+          // Insert separator when text follows tool results (new content block)
+          if (needsTextSeparator && state.streamingText) {
+            state.streamingText += "\n\n";
+            needsTextSeparator = false;
+          }
           state.streamingText += event.text;
           break;
 
@@ -147,6 +162,7 @@ export async function sendMessage(
                 }
               : tc,
           );
+          needsTextSeparator = true;
           break;
 
         case "turn_complete": {
@@ -160,6 +176,8 @@ export async function sendMessage(
           state.messages = [...state.messages, assistantMsg];
           state.streamingText = "";
           state.activeToolCalls = [];
+          state.isStreaming = false;
+          needsTextSeparator = false;
           break;
         }
 
@@ -189,6 +207,10 @@ export async function sendMessage(
     state.activeToolCalls = [];
     state.abortController = null;
   }
+}
+
+export function hasLocalStream(agentId: string): boolean {
+  return readState(agentId).abortController !== null;
 }
 
 export function abortStream(agentId: string): void {
