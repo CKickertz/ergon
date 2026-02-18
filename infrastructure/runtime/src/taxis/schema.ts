@@ -47,6 +47,8 @@ const CompactionConfig = z
     reserveTokensFloor: z.number().default(8000),
     maxHistoryShare: z.number().default(0.7),
     distillationModel: z.string().default("claude-haiku-4-5-20251001"),
+    preserveRecentMessages: z.number().default(4),
+    preserveRecentMaxTokens: z.number().default(4000),
     memoryFlush: z
       .object({
         enabled: z.boolean().default(true),
@@ -55,6 +57,13 @@ const CompactionConfig = z
         systemPrompt: z.string().optional(),
       })
       .default({}),
+  })
+  .default({});
+
+const ApprovalConfig = z
+  .object({
+    mode: z.enum(["autonomous", "guarded", "supervised"]).default("autonomous"),
+    autoApproveTimeoutMs: z.number().default(0), // 0 = wait forever
   })
   .default({});
 
@@ -116,12 +125,19 @@ const AgentDefaults = z.preprocess(
     userTimezone: z.string().default("UTC"),
     contextTokens: z.number().default(200000),
     maxOutputTokens: z.number().default(16384),
-    maxToolLoops: z.number().default(40),
+    maxToolLoops: z.number().default(100), // Deprecated — loop detector handles this now
     compaction: CompactionConfig.default({}),
     routing: RoutingConfig.default({}),
     heartbeat: HeartbeatConfig.optional(),
     tools: ToolsConfig.default({}),
     timeoutSeconds: z.number().default(300),
+    toolTimeouts: z
+      .object({
+        defaultMs: z.number().default(120_000),
+        overrides: z.record(z.string(), z.number()).default({}),
+      })
+      .default({}),
+    approval: ApprovalConfig.default({}),
   }).passthrough(),
 ).default({});
 
@@ -351,6 +367,31 @@ const WatchdogConfig = z
   })
   .default({});
 
+const BrandingConfig = z
+  .object({
+    name: z.string().default("Aletheia"),
+    tagline: z.string().optional(),
+    favicon: z.string().optional(),
+  })
+  .default({});
+
+const McpServerDef = z.object({
+  transport: z.enum(["stdio", "http", "sse"]).default("stdio"),
+  command: z.string().optional(),
+  args: z.array(z.string()).default([]),
+  env: z.record(z.string(), z.string()).default({}),
+  url: z.string().optional(),
+  headers: z.record(z.string(), z.string()).default({}),
+  timeoutMs: z.number().default(30000),
+});
+
+const McpConfig = z
+  .object({
+    enabled: z.boolean().default(false),
+    servers: z.record(z.string(), McpServerDef).default({}),
+  })
+  .default({});
+
 // passthrough() preserves unknown top-level fields (meta, wizard, browser, tools, etc.)
 // so they survive round-tripping without silent data loss
 export const AletheiaConfigSchema = z.object({
@@ -364,6 +405,8 @@ export const AletheiaConfigSchema = z.object({
   models: ModelsConfig.default({}),
   env: EnvConfig.default({}),
   watchdog: WatchdogConfig.default({}),
+  branding: BrandingConfig,
+  mcp: McpConfig.default({}),
 }).passthrough();
 
 export type AletheiaConfig = z.infer<typeof AletheiaConfigSchema>;

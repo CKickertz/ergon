@@ -149,7 +149,8 @@ async def import_facts(req: ImportRequest, request: Request):
             await asyncio.to_thread(mem.add, text, user_id=req.user_id, metadata=metadata)
             imported += 1
         except Exception as e:
-            errors.append({"index": i, "error": str(e)})
+            logger.debug("facts import error at index %d: %s", i, e)
+            errors.append({"index": i, "error": "Import failed"})
             if len(errors) > 10:
                 break
 
@@ -190,7 +191,7 @@ async def delete_memory(memory_id: str, request: Request):
 
 
 @router.get("/health")
-async def health_check():
+async def health_check(request: Request):
     checks: dict[str, Any] = {}
 
     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -200,18 +201,15 @@ async def health_check():
         except Exception as e:
             checks["qdrant"] = f"error: {e}"
 
-        try:
-            r = await client.post(
-                "https://api.voyageai.com/v1/embeddings",
-                headers={
-                    "Authorization": f"Bearer {os.environ.get('VOYAGE_API_KEY', '')}",
-                    "Content-Type": "application/json",
-                },
-                json={"model": "voyage-3-large", "input": ["health check"]},
-            )
-            checks["voyage"] = "ok" if r.status_code == 200 else f"status {r.status_code}"
-        except Exception as e:
-            checks["voyage"] = f"error: {e}"
+    try:
+        mem = request.app.state.memory
+        if mem and hasattr(mem, "embedding_model"):
+            vec = mem.embedding_model.embed("health check")
+            checks["embedder"] = "ok" if len(vec) > 0 else "empty vector"
+        else:
+            checks["embedder"] = "not initialized"
+    except Exception as e:
+        checks["embedder"] = f"error: {e}"
 
     try:
         from neo4j import GraphDatabase
@@ -267,29 +265,61 @@ async def graph_stats():
 async def graph_export(
     limit: int | None = None,
     community: int | None = None,
+    mode: str = "top",
 ):
-    """Export full graph as nodes + edges for 3D visualization."""
+    """Export graph as nodes + edges for 3D visualization.
+
+    Modes:
+      top       — Top N nodes by pagerank (default N=200). Smart default.
+      community — All nodes in a specific community (requires community param).
+      all       — Full graph export. Use with caution on large graphs.
+    """
     if not NEO4J_PASSWORD:
         raise HTTPException(status_code=503, detail="Neo4j not configured")
 
     try:
+        from collections import defaultdict
+
         from neo4j import GraphDatabase
 
         driver = GraphDatabase.driver(NEO4J_URL, auth=(NEO4J_USER, NEO4J_PASSWORD))
         with driver.session() as session:
-            # Fetch nodes
-            node_query = "MATCH (n) WHERE n.name IS NOT NULL "
-            if community is not None:
-                node_query += "AND n.community = $community "
-            node_query += "RETURN n.name AS name, labels(n) AS labels, n.pagerank AS pagerank, n.community AS community"
-            if limit:
-                node_query += f" LIMIT {int(limit)}"
+            # Total node count for "loaded X of Y" UI
+            total_nodes = session.run(
+                "MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c"
+            ).single()["c"]
 
-            params: dict[str, Any] = {}
-            if community is not None:
-                params["community"] = community
+            # Fetch nodes based on mode
+            if mode == "community" and community is not None:
+                node_query = (
+                    "MATCH (n) WHERE n.name IS NOT NULL AND n.community = $community "
+                    "RETURN n.name AS name, labels(n) AS labels, "
+                    "n.pagerank AS pagerank, n.community AS community "
+                    "ORDER BY n.pagerank DESC"
+                )
+                if limit:
+                    node_query += f" LIMIT {int(limit)}"
+                node_records = session.run(node_query, community=community).data()
+            elif mode == "all":
+                node_query = (
+                    "MATCH (n) WHERE n.name IS NOT NULL "
+                    "RETURN n.name AS name, labels(n) AS labels, "
+                    "n.pagerank AS pagerank, n.community AS community"
+                )
+                if limit:
+                    node_query += f" LIMIT {int(limit)}"
+                node_records = session.run(node_query).data()
+            else:
+                # mode=top (default): top N by pagerank
+                effective_limit = limit or 200
+                node_query = (
+                    "MATCH (n) WHERE n.name IS NOT NULL "
+                    "RETURN n.name AS name, labels(n) AS labels, "
+                    "n.pagerank AS pagerank, n.community AS community "
+                    "ORDER BY n.pagerank DESC LIMIT $lim"
+                )
+                node_records = session.run(node_query, lim=effective_limit).data()
 
-            node_records = session.run(node_query, **params).data()
             node_names = {r["name"] for r in node_records}
 
             nodes = [
@@ -302,22 +332,43 @@ async def graph_export(
                 for r in node_records
             ]
 
-            # Fetch edges (only between nodes in our set)
-            edge_query = (
-                "MATCH (a)-[r]->(b) WHERE a.name IS NOT NULL AND b.name IS NOT NULL "
-                "RETURN a.name AS source, b.name AS target, type(r) AS rel_type"
-            )
-            edge_records = session.run(edge_query).data()
+            # Fetch edges — optimized: push filter to Cypher when node set is small
+            if node_names and len(node_names) < 5000:
+                edge_records = session.run(
+                    "MATCH (a)-[r]->(b) "
+                    "WHERE a.name IN $names AND b.name IN $names "
+                    "RETURN a.name AS source, b.name AS target, type(r) AS rel_type",
+                    names=list(node_names),
+                ).data()
+                edges = [
+                    {"source": r["source"], "target": r["target"], "rel_type": r["rel_type"]}
+                    for r in edge_records
+                ]
+            else:
+                edge_records = session.run(
+                    "MATCH (a)-[r]->(b) WHERE a.name IS NOT NULL AND b.name IS NOT NULL "
+                    "RETURN a.name AS source, b.name AS target, type(r) AS rel_type"
+                ).data()
+                edges = [
+                    {"source": r["source"], "target": r["target"], "rel_type": r["rel_type"]}
+                    for r in edge_records
+                    if r["source"] in node_names and r["target"] in node_names
+                ]
 
-            # Filter edges to only include nodes we're returning
-            edges = [
-                {"source": r["source"], "target": r["target"], "rel_type": r["rel_type"]}
-                for r in edge_records
-                if r["source"] in node_names and r["target"] in node_names
-            ]
+            # Community metadata for cloud visualization
+            comm_nodes: dict[int, list[dict]] = defaultdict(list)
+            for n in nodes:
+                if n["community"] != -1:
+                    comm_nodes[n["community"]].append(n)
 
-            # Count distinct communities
-            community_ids = {n["community"] for n in nodes if n["community"] != -1}
+            community_meta = []
+            for cid, members in sorted(comm_nodes.items(), key=lambda x: -len(x[1])):
+                centroid = max(members, key=lambda m: m["pagerank"])
+                community_meta.append({
+                    "id": cid,
+                    "size": len(members),
+                    "centroid_node": centroid["id"],
+                })
 
         driver.close()
 
@@ -325,7 +376,9 @@ async def graph_export(
             "ok": True,
             "nodes": nodes,
             "edges": edges,
-            "communities": len(community_ids),
+            "communities": len(comm_nodes),
+            "community_meta": community_meta,
+            "total_nodes": total_nodes,
         }
     except Exception as e:
         logger.exception("graph/export failed")
@@ -686,7 +739,8 @@ def _log_retraction(req: RetractRequest, retracted: list[dict[str, Any]], neo4j_
     }
     with open(RETRACTION_LOG, "a") as f:
         f.write(json.dumps(entry) + "\n")
-    logger.info(f"Retraction logged: {len(retracted)} memories, reason={req.reason or 'none'}")
+    safe_reason = (req.reason or "none").replace("\n", " ").replace("\r", " ")[:100]
+    logger.info("Retraction logged: %d memories, reason=%s", len(retracted), safe_reason)
 
 
 # --- Episode recording (linked from /add) ---
@@ -819,7 +873,7 @@ async def active_foresight():
         return {"ok": True, "signals": signals}
     except Exception as e:
         logger.exception("active_foresight failed")
-        return {"ok": True, "signals": [], "error": str(e)}
+        return {"ok": True, "signals": [], "error": "Internal error"}
 
 
 @foresight_router.post("/decay")
@@ -1063,18 +1117,23 @@ async def analyze_graph(req: GraphAnalyzeRequest):
                     })
         dedup_candidates.sort(key=lambda x: -x["jaccard"])
 
-        # Store scores back to Neo4j
+        # Store scores back to Neo4j for ALL nodes (not just top_k)
         scores_stored = 0
         if req.store_scores:
             with driver.session() as session:
-                for name, score in top_pagerank:
-                    community_id = community_map.get(name, -1)
+                batch = [
+                    {"name": name, "score": round(score, 6), "community": community_map.get(name, -1)}
+                    for name, score in pagerank.items()
+                ]
+                for i in range(0, len(batch), 500):
+                    chunk = batch[i : i + 500]
                     session.run(
-                        "MATCH (n {name: $name}) "
-                        "SET n.pagerank = $score, n.community = $community",
-                        name=name, score=round(score, 6), community=community_id,
+                        "UNWIND $batch AS row "
+                        "MATCH (n {name: row.name}) "
+                        "SET n.pagerank = row.score, n.community = row.community",
+                        batch=chunk,
                     )
-                    scores_stored += 1
+                    scores_stored += len(chunk)
 
         driver.close()
 

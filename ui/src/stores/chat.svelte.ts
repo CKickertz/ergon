@@ -1,14 +1,16 @@
 import { fetchHistory } from "../lib/api";
 import { streamMessage } from "../lib/stream";
-import type { ChatMessage, ToolCallState, HistoryMessage, MediaItem } from "../lib/types";
+import type { ChatMessage, ToolCallState, HistoryMessage, MediaItem, PendingApproval } from "../lib/types";
 
 interface AgentChatState {
   messages: ChatMessage[];
   isStreaming: boolean;
+  remoteStreaming: boolean;
   streamingText: string;
   activeToolCalls: ToolCallState[];
   error: string | null;
   abortController: AbortController | null;
+  pendingApproval: PendingApproval | null;
 }
 
 let states = $state<Record<string, AgentChatState>>({});
@@ -16,10 +18,12 @@ let states = $state<Record<string, AgentChatState>>({});
 const EMPTY: AgentChatState = {
   messages: [],
   isStreaming: false,
+  remoteStreaming: false,
   streamingText: "",
   activeToolCalls: [],
   error: null,
   abortController: null,
+  pendingApproval: null,
 };
 
 // Read-only access — returns default for unknown agents, never mutates during render
@@ -33,10 +37,12 @@ function writeState(agentId: string): AgentChatState {
     states[agentId] = {
       messages: [],
       isStreaming: false,
+      remoteStreaming: false,
       streamingText: "",
       activeToolCalls: [],
       error: null,
       abortController: null,
+      pendingApproval: null,
     };
   }
   return states[agentId]!;
@@ -47,7 +53,12 @@ export function getMessages(agentId: string): ChatMessage[] {
 }
 
 export function getIsStreaming(agentId: string): boolean {
-  return readState(agentId).isStreaming;
+  const s = readState(agentId);
+  return s.isStreaming || s.remoteStreaming;
+}
+
+export function setRemoteStreaming(agentId: string, active: boolean): void {
+  writeState(agentId).remoteStreaming = active;
 }
 
 export function getStreamingText(agentId: string): string {
@@ -60,6 +71,14 @@ export function getActiveToolCalls(agentId: string): ToolCallState[] {
 
 export function getError(agentId: string): string | null {
   return readState(agentId).error;
+}
+
+export function getPendingApproval(agentId: string): PendingApproval | null {
+  return readState(agentId).pendingApproval;
+}
+
+export function clearPendingApproval(agentId: string): void {
+  writeState(agentId).pendingApproval = null;
 }
 
 export function clearError(agentId: string): void {
@@ -82,6 +101,7 @@ export function clearMessages(agentId: string): void {
   state.streamingText = "";
   state.activeToolCalls = [];
   state.error = null;
+  state.pendingApproval = null;
 }
 
 /** Inject a local-only message (not sent to any agent) */
@@ -122,10 +142,17 @@ export async function sendMessage(
   state.activeToolCalls = [];
   state.abortController = new AbortController();
 
+  let needsTextSeparator = false;
+
   try {
     for await (const event of streamMessage(agentId, text, sessionKey, state.abortController!.signal, media)) {
       switch (event.type) {
         case "text_delta":
+          // Insert separator when text follows tool results (new content block)
+          if (needsTextSeparator && state.streamingText) {
+            state.streamingText += "\n\n";
+            needsTextSeparator = false;
+          }
           state.streamingText += event.text;
           break;
 
@@ -147,6 +174,22 @@ export async function sendMessage(
                 }
               : tc,
           );
+          needsTextSeparator = true;
+          break;
+
+        case "tool_approval_required":
+          state.pendingApproval = {
+            turnId: event.turnId,
+            toolName: event.toolName,
+            toolId: event.toolId,
+            input: event.input,
+            risk: event.risk,
+            reason: event.reason,
+          };
+          break;
+
+        case "tool_approval_resolved":
+          state.pendingApproval = null;
           break;
 
         case "turn_complete": {
@@ -160,6 +203,8 @@ export async function sendMessage(
           state.messages = [...state.messages, assistantMsg];
           state.streamingText = "";
           state.activeToolCalls = [];
+          state.isStreaming = false;
+          needsTextSeparator = false;
           break;
         }
 
@@ -188,7 +233,12 @@ export async function sendMessage(
     state.streamingText = "";
     state.activeToolCalls = [];
     state.abortController = null;
+    state.pendingApproval = null;
   }
+}
+
+export function hasLocalStream(agentId: string): boolean {
+  return readState(agentId).abortController !== null;
 }
 
 export function abortStream(agentId: string): void {

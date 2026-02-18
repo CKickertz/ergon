@@ -1,5 +1,5 @@
 // SSE event stream consumer — dispatches Signal messages to NousManager
-import { createLogger } from "../koina/logger.js";
+import { createLogger, withTurnAsync } from "../koina/logger.js";
 import type { NousManager, InboundMessage, MediaAttachment } from "../nous/manager.js";
 import { SignalClient } from "./client.js";
 import { sendMessage, sendTyping, sendReadReceipt, type SendTarget } from "./sender.js";
@@ -295,6 +295,16 @@ function handleEnvelope(
   if (commands && store && config) {
     const match = commands.match(text);
     if (match) {
+      // Enforce adminOnly commands — only allowFrom[0] (owner) can run them
+      if (match.handler.adminOnly) {
+        const allowFrom = account.allowFrom?.map(String) ?? [];
+        const senderUuid = envelope.sourceUuid ?? sender;
+        if (allowFrom.length > 0 && !allowFrom.includes(senderUuid) && !allowFrom.includes(sender)) {
+          log.warn(`Admin command !${match.handler.name} blocked for ${envelope.sourceName ?? sender}`);
+          void sendMessage(client, target, "That command requires admin access.", { markdown: false });
+          return;
+        }
+      }
       log.info(`Command !${match.handler.name} from ${envelope.sourceName ?? sender}`);
       const cmdCtx: CommandContext = {
         sender: envelope.sourceUuid ?? sender,
@@ -362,7 +372,10 @@ function handleEnvelope(
   // Fire-and-forget — the session mutex in manager.ts serializes same-session turns,
   // while different nous/sessions process concurrently
   activeTurns.set(accountId, accountTurns + 1);
-  preprocessAndProcess(manager, msg, client, target, dataMessage.attachments, accountPhone, account.mediaMaxMb).finally(() => {
+  withTurnAsync(
+    { channel: "signal", sessionKey, sender: envelope.sourceName ?? sender },
+    () => preprocessAndProcess(manager, msg, client, target, dataMessage.attachments, accountPhone, account.mediaMaxMb),
+  ).finally(() => {
     const current = activeTurns.get(accountId) ?? 1;
     if (current <= 1) {
       activeTurns.delete(accountId);

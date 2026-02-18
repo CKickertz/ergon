@@ -23,6 +23,7 @@ export interface ToolContext {
   workspace: string;
   allowedRoots?: string[];
   depth?: number;
+  signal?: AbortSignal;
 }
 
 interface ActiveToolEntry {
@@ -41,6 +42,12 @@ export class ToolRegistry {
     }
     this.tools.set(name, handler);
     log.debug(`Registered tool: ${name}`);
+  }
+
+  unregister(name: string): boolean {
+    const deleted = this.tools.delete(name);
+    if (deleted) log.debug(`Unregistered tool: ${name}`);
+    return deleted;
   }
 
   get(name: string): ToolHandler | undefined {
