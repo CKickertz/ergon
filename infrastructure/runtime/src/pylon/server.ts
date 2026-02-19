@@ -1,7 +1,7 @@
 // Hono HTTP gateway
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, randomBytes, scryptSync, createCipheriv } from "node:crypto";
 import { createLogger, withTurnAsync } from "../koina/logger.js";
 import type { NousManager } from "../nous/manager.js";
 import type { SessionStore } from "../mneme/store.js";
@@ -275,6 +275,47 @@ export function createGateway(
     const requestSignal = c.req.raw.signal;
     let activeTurnId: string | null = null;
 
+    // Thread resolution: webchat identity is "anonymous" until auth is wired
+    let webchatThreadId: string | undefined;
+    let webchatBindingId: string | undefined;
+    let webchatLockKey: string | undefined;
+    try {
+      const identity = "anonymous";
+      const channelKey = `web:${identity}:${agentId}`;
+      const thread = manager.sessionStore.resolveThread(agentId, identity);
+      const binding = manager.sessionStore.resolveBinding(thread.id, "webchat", channelKey);
+      webchatThreadId = thread.id;
+      webchatBindingId = binding.id;
+      webchatLockKey = `binding:${binding.id}`;
+    } catch (err) {
+      log.warn(`Webchat thread resolution failed: ${err instanceof Error ? err.message : err}`);
+    }
+
+    // Handle /new topic boundary command
+    const newTopicMatch = message.trim().match(/^\/new(?:\s+(.+))?$/i);
+    if (newTopicMatch) {
+      const topicLabel = newTopicMatch[1]?.trim() ?? "";
+      const boundaryContent = topicLabel ? `[TOPIC: ${topicLabel}]` : "[TOPIC]";
+      const ackText = topicLabel ? `New topic: ${topicLabel}` : "New topic started.";
+      try {
+        const session = store.findOrCreateSession(agentId, resolvedSessionKey);
+        store.appendMessage(session.id, "user", boundaryContent, { tokenEstimate: 10 });
+      } catch (err) {
+        log.warn(`Topic boundary insert failed: ${err instanceof Error ? err.message : err}`);
+      }
+      const enc = new TextEncoder();
+      const topicStream = new ReadableStream({
+        start(ctrl) {
+          const turnId = `webchat:topic:${Date.now()}`;
+          ctrl.enqueue(enc.encode(`event: turn_start\ndata: ${JSON.stringify({ type: "turn_start", sessionId: "", nousId: agentId, turnId })}\n\n`));
+          ctrl.enqueue(enc.encode(`event: text_delta\ndata: ${JSON.stringify({ type: "text_delta", text: ackText })}\n\n`));
+          ctrl.enqueue(enc.encode(`event: turn_complete\ndata: ${JSON.stringify({ type: "turn_complete", outcome: { text: ackText, nousId: agentId, sessionId: "", toolCalls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } })}\n\n`));
+          ctrl.close();
+        },
+      });
+      return new Response(topicStream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" } });
+    }
+
     const stream = new ReadableStream({
       async start(controller) {
         await withTurnAsync(
@@ -285,6 +326,9 @@ export function createGateway(
                 text: message,
                 nousId: agentId,
                 sessionKey: resolvedSessionKey,
+                ...(webchatThreadId ? { threadId: webchatThreadId } : {}),
+                ...(webchatBindingId ? { bindingId: webchatBindingId } : {}),
+                ...(webchatLockKey ? { lockKey: webchatLockKey } : {}),
                 ...(validMedia.length > 0 ? { media: validMedia } : {}),
               })) {
                 if (event.type === "turn_start") {
@@ -548,6 +592,43 @@ export function createGateway(
     }
   });
 
+  // --- Thread API ---
+
+  app.get("/api/threads", (c) => {
+    const nousId = c.req.query("nousId");
+    const threads = store.listThreads(nousId ?? undefined);
+    return c.json({ threads });
+  });
+
+  app.get("/api/threads/:id/history", (c) => {
+    const id = c.req.param("id");
+    const before = c.req.query("before");
+    const limit = Math.min(parseInt(c.req.query("limit") ?? "50", 10), 200);
+    const messages = store.getThreadHistory(id, {
+      ...(before ? { before } : {}),
+      limit,
+    });
+    return c.json({
+      messages: messages.map((m) => ({
+        id: m.id,
+        sessionId: m.sessionId,
+        seq: m.seq,
+        role: m.role,
+        content: m.content,
+        toolCallId: m.toolCallId,
+        toolName: m.toolName,
+        createdAt: m.createdAt,
+      })),
+    });
+  });
+
+  app.get("/api/threads/:id/summary", (c) => {
+    const id = c.req.param("id");
+    const summary = store.getThreadSummary(id);
+    if (!summary) return c.json({ error: "No summary for this thread" }, 404);
+    return c.json(summary);
+  });
+
   // --- Contact/Pairing API ---
 
   app.get("/api/contacts/pending", (c) => {
@@ -715,14 +796,21 @@ export function createGateway(
 
   const memoryUrl = process.env["MEMORY_SIDECAR_URL"] ?? "http://127.0.0.1:8230";
 
+  function memorySidecarHeaders(extra?: Record<string, string>): Record<string, string> {
+    const headers: Record<string, string> = { ...extra };
+    const key = process.env["ALETHEIA_MEMORY_KEY"];
+    if (key) headers["Authorization"] = `Bearer ${key}`;
+    return headers;
+  }
+
   app.get("/api/memory/graph/export", async (c) => {
     const qs = c.req.url.includes("?") ? "?" + c.req.url.split("?")[1] : "";
-    const res = await fetch(`${memoryUrl}/graph/export${qs}`);
+    const res = await fetch(`${memoryUrl}/graph/export${qs}`, { headers: memorySidecarHeaders() });
     return c.json(await res.json(), res.status as 200);
   });
 
   app.get("/api/memory/graph_stats", async (c) => {
-    const res = await fetch(`${memoryUrl}/graph_stats`);
+    const res = await fetch(`${memoryUrl}/graph_stats`, { headers: memorySidecarHeaders() });
     return c.json(await res.json(), res.status as 200);
   });
 
@@ -730,7 +818,7 @@ export function createGateway(
     const body = await c.req.text();
     const res = await fetch(`${memoryUrl}/graph/analyze`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: memorySidecarHeaders({ "Content-Type": "application/json" }),
       body,
     });
     return c.json(await res.json(), res.status as 200);
@@ -782,6 +870,70 @@ export function createGateway(
       headers: {
         "Content-Type": "application/x-ndjson",
         "Content-Disposition": `attachment; filename="${id}.jsonl"`,
+      },
+    });
+  });
+
+  /**
+   * POST /api/export/encrypted
+   * Body: { password: string, nousId?: string, since?: string }
+   * Returns: encrypted NDJSON payload (AES-256-GCM, scrypt KDF).
+   * Format: JSON envelope { v, kdf, salt, n, r, p, iv, data }
+   * where `data` is base64(ciphertext || authTag).
+   */
+  app.post("/api/export/encrypted", async (c) => {
+    const body = await c.req.json<{ password?: unknown; nousId?: unknown; since?: unknown }>();
+    const password = body.password;
+    if (typeof password !== "string" || password.length < 8) {
+      return c.json({ error: "password must be at least 8 characters" }, 400);
+    }
+
+    const nousId = typeof body.nousId === "string" ? body.nousId : undefined;
+    const since = typeof body.since === "string" ? body.since : undefined;
+
+    // Collect all sessions + messages as NDJSON
+    const sessions = store.listSessionsFiltered({
+      ...(nousId ? { nousId } : {}),
+      ...(since ? { since } : {}),
+    });
+    const lines: string[] = [];
+    for (const s of sessions) {
+      lines.push(JSON.stringify({ type: "session", ...s }));
+      const messages = store.getHistory(s.id, { excludeDistilled: false });
+      for (const m of messages) {
+        lines.push(JSON.stringify({ type: "message", sessionId: s.id, seq: m.seq, role: m.role, content: m.content, createdAt: m.createdAt }));
+      }
+    }
+    const plaintext = Buffer.from(lines.join("\n") + "\n", "utf8");
+
+    // Derive key: scrypt N=16384 r=8 p=1 → 32 bytes
+    const salt = randomBytes(32);
+    const N = 16384, r = 8, p = 1;
+    const key = scryptSync(password, salt, 32, { N, r, p });
+
+    // Encrypt: AES-256-GCM
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    const data = Buffer.concat([ct, authTag]).toString("base64");
+
+    const envelope = {
+      v: 1,
+      kdf: "scrypt",
+      salt: salt.toString("base64"),
+      n: N, r, p,
+      iv: iv.toString("base64"),
+      cipher: "aes-256-gcm",
+      data,
+      sessionCount: sessions.length,
+      exportedAt: new Date().toISOString(),
+    };
+
+    return new Response(JSON.stringify(envelope), {
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Disposition": `attachment; filename="aletheia-export-${Date.now()}.enc.json"`,
       },
     });
   });

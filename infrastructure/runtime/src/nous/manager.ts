@@ -64,6 +64,8 @@ export class NousManager {
     log.info(`NousManager initialized with ${config.agents.list.length} nous`);
   }
 
+  get sessionStore(): SessionStore { return this.store; }
+
   setPlugins(plugins: PluginRegistry): void { this.plugins = plugins; }
   setWatchdog(watchdog: Watchdog): void { this.watchdog = watchdog; }
   setSkillsSection(section: string | undefined): void { this.skillsSection = section; }
@@ -134,7 +136,7 @@ export class NousManager {
 
     const services = this.buildServices();
     const nousId = resolveNousId(msg, services);
-    const lockKey = `${nousId}:${msg.sessionKey ?? "main"}`;
+    const lockKey = msg.lockKey ?? `${nousId}:${msg.sessionKey ?? "main"}`;
     const turnId = `${nousId}:${++turnCounter}:${Date.now()}`;
     const abortController = new AbortController();
 
@@ -193,7 +195,7 @@ export class NousManager {
 
     const services = this.buildServices();
     const nousId = resolveNousId(msg, services);
-    const lockKey = `${nousId}:${msg.sessionKey ?? "main"}`;
+    const lockKey = msg.lockKey ?? `${nousId}:${msg.sessionKey ?? "main"}`;
 
     this.trackTurnStart(nousId);
     try {
@@ -259,6 +261,7 @@ export class NousManager {
     const nous = resolveNous(this.config, session.nousId);
     const workspace = nous ? resolveWorkspace(this.config, nous) : undefined;
 
+    const thread = this.store.getThreadForSession(sessionId);
     log.info(`Manual distillation triggered for session ${sessionId}`);
     await distillSession(this.store, this.router, sessionId, session.nousId, {
       triggerThreshold: distillThreshold,
@@ -269,6 +272,11 @@ export class NousManager {
       preserveRecentMaxTokens: compaction.preserveRecentMaxTokens,
       ...(workspace ? { workspace } : {}),
       ...(this.plugins ? { plugins: this.plugins } : {}),
+      ...(thread ? {
+        onThreadSummaryUpdate: (summary, keyFacts) => {
+          this.store.updateThreadSummary(thread.id, summary, keyFacts);
+        },
+      } : {}),
     });
   }
 }
