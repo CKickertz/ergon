@@ -2,7 +2,7 @@
 import type { AletheiaConfig, NousConfig } from "../../taxis/schema.js";
 import type { SessionStore } from "../../mneme/store.js";
 import type { ProviderRouter } from "../../hermeneus/router.js";
-import type { ToolRegistry, ToolContext } from "../../organon/registry.js";
+import type { ToolContext, ToolRegistry } from "../../organon/registry.js";
 import type { PluginRegistry } from "../../prostheke/registry.js";
 import type { Watchdog } from "../../daemon/watchdog.js";
 import type { CompetenceModel } from "../competence.js";
@@ -62,6 +62,7 @@ export type TurnStreamEvent =
   | { type: "tool_approval_resolved"; toolId: string; decision: string }
   | { type: "turn_complete"; outcome: TurnOutcome }
   | { type: "turn_abort"; reason: string }
+  | { type: "queue_drained"; count: number }
   | { type: "error"; message: string };
 
 export type SystemBlock = { type: "text"; text: string; cache_control?: { type: "ephemeral" } };
