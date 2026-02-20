@@ -1,11 +1,12 @@
 // SSE event stream consumer — dispatches Signal messages to NousManager
 import { createLogger, withTurnAsync } from "../koina/logger.js";
-import type { NousManager, InboundMessage, MediaAttachment } from "../nous/manager.js";
-import { SignalClient } from "./client.js";
-import { sendMessage, sendTyping, sendReadReceipt, type SendTarget } from "./sender.js";
-import type { SignalAccount, AletheiaConfig } from "../taxis/schema.js";
+import { TransportError } from "../koina/errors.js";
+import type { InboundMessage, MediaAttachment, NousManager } from "../nous/manager.js";
+import type { SignalClient } from "./client.js";
+import { sendMessage, sendReadReceipt, type SendTarget, sendTyping } from "./sender.js";
+import type { AletheiaConfig, SignalAccount } from "../taxis/schema.js";
 import type { SessionStore } from "../mneme/store.js";
-import type { CommandRegistry, CommandContext } from "./commands.js";
+import type { CommandContext, CommandRegistry } from "./commands.js";
 import type { Watchdog } from "../daemon/watchdog.js";
 import type { SkillRegistry } from "../organon/skills.js";
 import { preprocessLinks } from "./preprocess.js";
@@ -124,11 +125,14 @@ async function consumeEventStream(
   const res = await fetch(url, fetchOpts);
 
   if (!res.ok) {
-    throw new Error(`SSE connect failed: ${res.status} ${res.statusText}`);
+    throw new TransportError(`SSE connect failed: ${res.status} ${res.statusText}`, {
+      code: "SIGNAL_SSE_FAILED", recoverable: true, retryAfterMs: 5_000,
+      context: { status: res.status, url },
+    });
   }
 
   if (!res.body) {
-    throw new Error("SSE response has no body");
+    throw new TransportError("SSE response has no body", { code: "SIGNAL_SSE_FAILED" });
   }
 
   const reader = res.body.getReader();
