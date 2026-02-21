@@ -20,6 +20,8 @@ import { mem0SearchTool } from "./organon/built-in/mem0-search.js";
 import { factRetractTool } from "./organon/built-in/fact-retract.js";
 import { memoryCorrectTool } from "./organon/built-in/memory-correct.js";
 import { memoryForgetTool } from "./organon/built-in/memory-forget.js";
+import { mem0RetractTool } from "./organon/built-in/mem0-retract.js";
+import { mem0AuditTool } from "./organon/built-in/mem0-audit.js";
 import { browserTool, closeBrowser } from "./organon/built-in/browser.js";
 import { createMessageTool } from "./organon/built-in/message.js";
 import { createVoiceReplyTool } from "./organon/built-in/voice-reply.js";
@@ -34,6 +36,7 @@ import { createPlanTools } from "./organon/built-in/plan.js";
 import { createPlanProposeHandler } from "./organon/built-in/plan-propose.js";
 import { traceLookupTool } from "./organon/built-in/trace-lookup.js";
 import { createCheckCalibrationTool } from "./organon/built-in/check-calibration.js";
+import { createSelfEvaluateTool } from "./organon/built-in/self-evaluate.js";
 import { createWhatDoIKnowTool } from "./organon/built-in/what-do-i-know.js";
 import { createRecentCorrectionsTool } from "./organon/built-in/recent-corrections.js";
 import { createBlackboardTool } from "./organon/built-in/blackboard.js";
@@ -43,9 +46,11 @@ import { createStatusReportTool } from "./organon/built-in/status-report.js";
 import { createResearchTool } from "./organon/built-in/research.js";
 import { createDeliberateTool } from "./organon/built-in/deliberate.js";
 import { createSelfAuthorTools, loadAuthoredTools } from "./organon/self-author.js";
+import { createPipelineConfigTool } from "./organon/built-in/pipeline-config.js";
+import { loadCustomCommands, registerCustomCommands } from "./organon/custom-commands.js";
 import { NousManager } from "./nous/manager.js";
 import { McpClientManager } from "./organon/mcp-client.js";
-import { createGateway, setCommandsRef, setCronRef, setMcpRef, setSkillsRef, setWatchdogRef, startGateway, type GatewayAuthDeps } from "./pylon/server.js";
+import { createGateway, type GatewayAuthDeps, setCommandsRef, setCronRef, setMcpRef, setSkillsRef, setWatchdogRef, startGateway } from "./pylon/server.js";
 import { AuthSessionStore } from "./auth/sessions.js";
 import { AuditLog } from "./auth/audit.js";
 import { generateSecret } from "./auth/tokens.js";
@@ -76,6 +81,7 @@ import type { AletheiaConfig } from "./taxis/schema.js";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import Database from "better-sqlite3";
 import { eventBus } from "./koina/event-bus.js";
+import { registerHooks, type HookRegistry } from "./koina/hooks.js";
 
 const log = createLogger("aletheia");
 
@@ -155,6 +161,8 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
   tools.register({ ...factRetractTool, category: "available" as const });
   tools.register({ ...memoryCorrectTool, category: "available" as const });
   tools.register({ ...memoryForgetTool, category: "available" as const });
+  tools.register({ ...mem0RetractTool, category: "available" as const });
+  tools.register({ ...mem0AuditTool, category: "available" as const });
   tools.register({ ...traceLookupTool, category: "available" as const });
 
   // Browser (requires chromium on host)
@@ -172,7 +180,7 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
   tools.register(sessionStatusTool);
 
   // Planning tools (available on-demand)
-  for (const planTool of createPlanTools()) {
+  for (const planTool of createPlanTools(store)) {
     planTool.category = "available";
     tools.register(planTool);
   }
@@ -274,6 +282,14 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
   const correctionsTool = createRecentCorrectionsTool(store);
   correctionsTool.category = "available";
   tools.register(correctionsTool);
+  const selfEvalTool = createSelfEvaluateTool(store, competence, uncertainty);
+  selfEvalTool.category = "available";
+  tools.register(selfEvalTool);
+
+  // Pipeline self-configuration — agents tune recall, tool expiry, note budget
+  const pipelineCfgTool = createPipelineConfigTool();
+  pipelineCfgTool.category = "available";
+  tools.register(pipelineCfgTool);
 
   // Cross-agent blackboard — persistent shared state with auto-expiry
   tools.register(createBlackboardTool(store));
@@ -338,6 +354,21 @@ export async function startRuntime(configPath?: string): Promise<void> {
     log.info(`Loaded ${runtime.plugins.size} plugins`);
     runtime.manager.setPlugins(runtime.plugins);
     await runtime.plugins.dispatchStart();
+  }
+
+  // --- Declarative Hooks ---
+  // Load YAML hook definitions from shared/hooks/ and wire to event bus.
+  // These run shell commands at lifecycle points — no TypeScript required.
+  const hooksDir = join(paths.shared, "hooks");
+  const hookRegistry = registerHooks(hooksDir);
+  // Also load per-nous hooks from each agent workspace (nous/<id>/hooks/)
+  const perNousHookRegistries: HookRegistry[] = [];
+  for (const agent of config.agents.list) {
+    const agentHooksDir = join(paths.nous, agent.id, "hooks");
+    const agentHooks = registerHooks(agentHooksDir);
+    if (agentHooks.hooks.length > 0) {
+      perNousHookRegistries.push(agentHooks);
+    }
   }
 
   // --- Auth ---
@@ -435,6 +466,11 @@ export async function startRuntime(configPath?: string): Promise<void> {
 
   // --- Command Registry ---
   const commandRegistry = createDefaultRegistry();
+  const customCmds = loadCustomCommands(join(paths.shared, "commands"));
+  if (customCmds.length > 0) {
+    const registered = registerCustomCommands(customCmds, commandRegistry, runtime.manager);
+    log.info(`Loaded ${registered} custom commands from shared/commands/`);
+  }
   setCommandsRef(commandRegistry);
 
   // --- Signal ---
@@ -672,6 +708,8 @@ export async function startRuntime(configPath?: string): Promise<void> {
     }
     await closeBrowser().catch(() => {});
     await runtime.plugins.dispatchShutdown();
+    hookRegistry.teardown();
+    for (const reg of perNousHookRegistries) reg.teardown();
     runtime.shutdown();
     process.exit(0);
   };

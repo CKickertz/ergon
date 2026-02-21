@@ -7,6 +7,8 @@ import { recallMemories } from "../../recall.js";
 import { formatWorkingState } from "../../working-state.js";
 import { distillSession } from "../../../distillation/pipeline.js";
 import { eventBus } from "../../../koina/event-bus.js";
+import { classifyDomain } from "../../interaction-signals.js";
+import { loadPipelineConfig } from "../../pipeline-config.js";
 import type { RuntimeServices, SystemBlock, TurnState } from "../types.js";
 
 const log = createLogger("pipeline:context");
@@ -108,10 +110,18 @@ export async function buildContext(
     }
   }
 
+  // Pipeline config — per-agent tuning of recall, tool expiry, note budget
+  const pipelineConfig = loadPipelineConfig(workspace);
+
   // Pre-turn memory recall
   let recallTokens = 0;
   if (!degradedServices.includes("mem0-sidecar")) {
     const recall = await recallMemories(msg.text, nousId, {
+      limit: pipelineConfig.recall.limit,
+      maxTokens: pipelineConfig.recall.maxTokens,
+      minScore: pipelineConfig.recall.minScore,
+      sufficiencyThreshold: pipelineConfig.recall.sufficiencyThreshold,
+      sufficiencyMinHits: pipelineConfig.recall.sufficiencyMinHits,
       ...(state.nous.domains ? { domains: state.nous.domains } : {}),
       ...(threadSummaryText ? { threadSummary: threadSummaryText } : {}),
     });
@@ -171,7 +181,7 @@ export async function buildContext(
   // Agent notes injection — explicit notes written by the agent that survive distillation
   const notes = services.store.getNotes(sessionId, { limit: 20 });
   if (notes.length > 0) {
-    const NOTE_TOKEN_CAP = 2000;
+    const NOTE_TOKEN_CAP = pipelineConfig.notes.tokenCap;
     const header = "## Agent Notes\n\nNotes you wrote during this session. These survive context distillation.\n\n";
     let tokenCount = estimateTokens(header);
     const noteLines: string[] = [];
@@ -222,6 +232,28 @@ export async function buildContext(
         `Total tokens: ${totalInput}in / ${totalOutput}out (cache hit: ${cacheRate}%)\n` +
         `Last turn: ${lastTurnTokens}`,
     });
+  }
+
+  // Pre-turn competence suggestion — if this agent scores low in the detected domain
+  // and another agent scores high, suggest delegation
+  if (services.competence) {
+    const domain = classifyDomain(msg.text);
+    if (domain) {
+      const agentScore = services.competence.getScore(nousId, domain);
+      if (agentScore < 0.3) {
+        const better = services.competence.bestAgentForDomain(domain, [nousId]);
+        if (better && better.score > 0.6) {
+          systemPrompt.push({
+            type: "text",
+            text:
+              `## Competence Advisory\n\n` +
+              `Agent **${better.nousId}** has higher competence in **${domain}** ` +
+              `(score: ${better.score.toFixed(2)} vs your ${agentScore.toFixed(2)}).\n` +
+              `Consider delegating via \`sessions_ask\` if this task requires domain expertise.`,
+          });
+        }
+      }
+    }
   }
 
   // Tool definitions
