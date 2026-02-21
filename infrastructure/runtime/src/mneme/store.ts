@@ -97,6 +97,18 @@ export interface PlanStep {
   result?: string;
 }
 
+export interface ExecutionPlanStep {
+  id: string;
+  description: string;
+  status: "pending" | "in_progress" | "completed" | "failed" | "skipped";
+  acceptanceCriteria?: string;
+  dependsOn: string[];
+  result?: string;
+  failureReason?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
 export interface StoredPlan {
   id: string;
   sessionId: string;
@@ -1187,6 +1199,39 @@ export class SessionStore {
     }));
   }
 
+  getDailyCosts(days: number): Array<{
+    date: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    turns: number;
+  }> {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+    const rows = this.db
+      .prepare(
+        `SELECT DATE(created_at) AS date,
+                SUM(input_tokens) AS input_tokens,
+                SUM(output_tokens) AS output_tokens,
+                SUM(cache_read_tokens) AS cache_read_tokens,
+                SUM(cache_write_tokens) AS cache_write_tokens,
+                COUNT(*) AS turns
+         FROM usage
+         WHERE DATE(created_at) >= ?
+         GROUP BY DATE(created_at)
+         ORDER BY date ASC`,
+      )
+      .all(cutoff) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      date: row['date'] as string,
+      inputTokens: row['input_tokens'] as number,
+      outputTokens: row['output_tokens'] as number,
+      cacheReadTokens: row['cache_read_tokens'] as number,
+      cacheWriteTokens: row['cache_write_tokens'] as number,
+      turns: row['turns'] as number,
+    }));
+  }
+
   // --- Retention / Data Lifecycle ---
 
   /**
@@ -2031,10 +2076,16 @@ export class SessionStore {
       .run(status, resolvedAt, planId);
   }
 
-  updatePlanSteps(planId: string, steps: PlanStep[]): void {
+  updatePlanSteps(planId: string, steps: (PlanStep | ExecutionPlanStep)[]): void {
     this.db
       .prepare("UPDATE plans SET steps = ? WHERE id = ?")
       .run(JSON.stringify(steps), planId);
+  }
+
+  createExecutionPlan(plan: { id: string; sessionId: string; nousId: string; goal: string; steps: ExecutionPlanStep[] }): void {
+    this.db
+      .prepare("INSERT INTO plans (id, session_id, nous_id, status, steps, total_estimated_cost_cents) VALUES (?, ?, ?, 'executing', ?, 0)")
+      .run(plan.id, plan.sessionId, plan.nousId, JSON.stringify(plan.steps));
   }
 
   private mapPlan(r: Record<string, unknown>): StoredPlan {

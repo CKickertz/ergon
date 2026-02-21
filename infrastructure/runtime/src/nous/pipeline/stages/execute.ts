@@ -16,6 +16,7 @@ import type {
   UserContentBlock,
 } from "../../../hermeneus/anthropic.js";
 import type {
+  Plan,
   RuntimeServices,
   TurnOutcome,
   TurnState,
@@ -23,7 +24,7 @@ import type {
 } from "../types.js";
 import { truncateToolResult } from "./truncate.js";
 import { PLAN_PROPOSED_MARKER } from "../../../organon/built-in/plan-propose.js";
-import type { Plan } from "../types.js";
+import { loadPipelineConfig } from "../../pipeline-config.js";
 
 interface PlanProposalData {
   id: string;
@@ -217,7 +218,7 @@ export async function* executeStreaming(
       trace.setResponseLength(text.length);
       trace.setToolLoops(loop + 1);
 
-      services.tools.expireUnusedTools(sessionId, seq + loop);
+      services.tools.expireUnusedTools(sessionId, seq + loop, loadPipelineConfig(state.workspace).tools.expiryTurns);
 
       // Update accumulators on state for finalize
       state.totalToolCalls = totalToolCalls;
@@ -561,7 +562,7 @@ export async function executeBuffered(
       trace.setResponseLength(text.length);
       trace.setToolLoops(loop + 1);
 
-      services.tools.expireUnusedTools(sessionId, seq + loop);
+      services.tools.expireUnusedTools(sessionId, seq + loop, loadPipelineConfig(state.workspace).tools.expiryTurns);
 
       state.totalToolCalls = totalToolCalls;
       state.totalInputTokens = totalInputTokens;
