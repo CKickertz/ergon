@@ -27,6 +27,10 @@
     clearPendingApproval,
     getPendingPlan,
     clearPendingPlan,
+    addRemoteToolCall,
+    setTurnStartedAt,
+    getTurnStartedAt,
+    injectUserMessage,
   } from "../../stores/chat.svelte";
   import type { MediaItem } from "../../lib/types";
   import {
@@ -44,10 +48,11 @@
     refreshSessions,
     createNewSession,
     loadSessions,
+    isSessionsLoading,
   } from "../../stores/sessions.svelte";
-  import { distillSession, fetchCommands, executeCommand } from "../../lib/api";
+  import { distillSession, fetchCommands, executeCommand, queueMessage } from "../../lib/api";
   import type { CommandInfo } from "../../lib/types";
-  import { onGlobalEvent, getActiveTurns } from "../../lib/events.svelte";
+  import { onGlobalEvent } from "../../lib/events.svelte";
   import { onMount, onDestroy, untrack } from "svelte";
   import { addNotification } from "../../stores/notifications.svelte";
   import { showToast } from "../../stores/toast.svelte";
@@ -84,6 +89,7 @@
         const turnData = data as { nousId?: string; sessionId?: string; text?: string };
         if (turnData.nousId === agentId) {
           setRemoteStreaming(agentId, false);
+          setTurnStartedAt(agentId, null);
           if (!hasLocalStream(agentId)) {
             const sessionId = getActiveSessionId();
             if (sessionId) {
@@ -108,6 +114,14 @@
         const turnData = data as { nousId?: string };
         if (turnData.nousId === agentId) {
           setRemoteStreaming(agentId, true);
+          setTurnStartedAt(agentId, Date.now());
+        }
+      }
+
+      if (event === "tool:called") {
+        const toolData = data as { nousId?: string; tool?: string; durationMs?: number };
+        if (toolData.nousId === agentId && toolData.tool) {
+          addRemoteToolCall(agentId, toolData.tool, toolData.durationMs);
         }
       }
 
@@ -148,20 +162,23 @@
       } else {
         loadHistory(currentAgentId, sessionId);
       }
+    } else if (!sessionId && currentAgentId) {
+      // Agent active but no session — load sessions once (untrack prevents loop)
+      untrack(() => {
+        if (!isSessionsLoading()) {
+          prevSessionId = null;
+          loadSessions(currentAgentId);
+        }
+      });
     } else if (!sessionId && prevSessionId) {
       prevSessionId = null;
       if (currentAgentId) clearMessages(currentAgentId);
     }
   });
 
-  // Sync remote streaming state from SSE activeTurns
-  $effect(() => {
-    const agentId = getActiveAgentId();
-    if (!agentId) return;
-    const activeTurns = getActiveTurns();
-    const active = activeTurns[agentId] && activeTurns[agentId] > 0;
-    untrack(() => setRemoteStreaming(agentId, !!active));
-  });
+  // Remote streaming state is synced via the onGlobalEvent handler above
+  // (turn:before → setRemoteStreaming(true), turn:after → setRemoteStreaming(false))
+  // No $effect needed — that would re-fire on every SSE event due to $state object churn.
 
   // Slash command registry
   const slashCommands: Record<string, { description: string; handler: (args?: string) => void }> = {
@@ -279,6 +296,17 @@
     });
   }
 
+  function handleQueue(text: string) {
+    if (!currentAgentId) return;
+    injectUserMessage(currentAgentId, text);
+    const sessionId = getActiveSessionId();
+    if (sessionId) {
+      queueMessage(sessionId, text).catch((err) => {
+        injectLocalMessage(currentAgentId!, `*Queue failed: ${err instanceof Error ? err.message : String(err)}*`);
+      });
+    }
+  }
+
   let agent = $derived(getActiveAgent());
   let currentAgentId = $derived(getActiveAgentId());
   let emoji = $derived(currentAgentId ? getAgentEmoji(currentAgentId) : null);
@@ -290,6 +318,8 @@
     const contextWindow = 200_000;
     return Math.min(100, Math.round((tokens / contextWindow) * 100));
   });
+
+  let turnStartedAt = $derived(currentAgentId ? getTurnStartedAt(currentAgentId) : null);
 
   // Pending tool approval
   let pendingApproval = $derived(currentAgentId ? getPendingApproval(currentAgentId) : null);
@@ -377,6 +407,7 @@
       thinkingText={currentAgentId ? getThinkingText(currentAgentId) : ""}
       activeToolCalls={currentAgentId ? getActiveToolCalls(currentAgentId) : []}
       isStreaming={currentAgentId ? getIsStreaming(currentAgentId) : false}
+      {turnStartedAt}
       agentName={agent?.name}
       agentEmoji={emoji}
       onToolClick={handleToolClick}
@@ -404,6 +435,7 @@
     isStreaming={currentAgentId ? getIsStreaming(currentAgentId) : false}
     onSend={handleSend}
     onAbort={handleAbort}
+    onQueue={handleQueue}
     contextPercent={contextPercent()}
     slashCommands={getSlashCommands()}
   />
