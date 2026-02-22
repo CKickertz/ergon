@@ -60,7 +60,7 @@ export const ROLES: Record<RoleName, RoleConfig> = {
     description: "Web research, doc reading, API exploration, summarizing findings.",
   },
   explorer: {
-    model: "anthropic/claude-haiku-3-5-20241022",
+    model: "anthropic/claude-haiku-4-5-20251001",
     systemPrompt: EXPLORER_PROMPT,
     tools: ["read", "grep", "find", "ls", "exec"],
     maxTurns: 10,
@@ -68,7 +68,7 @@ export const ROLES: Record<RoleName, RoleConfig> = {
     description: "Read-only codebase investigation. Grep, trace, summarize.",
   },
   runner: {
-    model: "anthropic/claude-haiku-3-5-20241022",
+    model: "anthropic/claude-haiku-4-5-20251001",
     systemPrompt: RUNNER_PROMPT,
     tools: ["exec", "read", "ls"],
     maxTurns: 5,
@@ -115,7 +115,7 @@ export function parseStructuredResult(responseText: string): SubAgentResult | nu
       ...(parsed["issues"] ? { issues: parsed["issues"] as SubAgentIssue[] } : {}),
       confidence: (parsed["confidence"] as number) ?? 0.5,
     };
-  } catch {
+  } catch { /* role file parse failed */
     return null;
   }
 }

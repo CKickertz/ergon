@@ -4,6 +4,7 @@
   import ToolPanel from "./ToolPanel.svelte";
   import ThinkingPanel from "./ThinkingPanel.svelte";
   import ToolApproval from "./ToolApproval.svelte";
+  import PlanCard from "./PlanCard.svelte";
   import DistillationProgress from "./DistillationProgress.svelte";
   import ErrorBanner from "../shared/ErrorBanner.svelte";
   import type { ToolCallState } from "../../lib/types";
@@ -24,6 +25,8 @@
     setRemoteStreaming,
     getPendingApproval,
     clearPendingApproval,
+    getPendingPlan,
+    clearPendingPlan,
   } from "../../stores/chat.svelte";
   import type { MediaItem } from "../../lib/types";
   import {
@@ -44,7 +47,7 @@
   } from "../../stores/sessions.svelte";
   import { distillSession, fetchCommands, executeCommand } from "../../lib/api";
   import type { CommandInfo } from "../../lib/types";
-  import { onGlobalEvent } from "../../lib/events";
+  import { onGlobalEvent, getActiveTurns } from "../../lib/events";
   import { onMount, onDestroy } from "svelte";
   import { addNotification } from "../../stores/notifications.svelte";
   import { showToast } from "../../stores/toast.svelte";
@@ -142,6 +145,16 @@
     } else if (!sessionId && prevSessionId) {
       prevSessionId = null;
       if (currentAgentId) clearMessages(currentAgentId);
+    }
+  });
+
+  // Recover remote streaming state when agent becomes available
+  $effect(() => {
+    const agentId = getActiveAgentId();
+    if (!agentId) return;
+    const activeTurns = getActiveTurns();
+    if (activeTurns[agentId] && activeTurns[agentId] > 0) {
+      setRemoteStreaming(agentId, true);
     }
   });
 
@@ -275,9 +288,14 @@
 
   // Pending tool approval
   let pendingApproval = $derived(currentAgentId ? getPendingApproval(currentAgentId) : null);
+  let pendingPlan = $derived(currentAgentId ? getPendingPlan(currentAgentId) : null);
 
   function handleApprovalResolved() {
     if (currentAgentId) clearPendingApproval(currentAgentId);
+  }
+
+  function handlePlanResolved() {
+    if (currentAgentId) clearPendingPlan(currentAgentId);
   }
 
   // Tool panel state
@@ -370,6 +388,9 @@
       />
     {/if}
   </div>
+  {#if pendingPlan}
+    <PlanCard plan={pendingPlan} onResolved={handlePlanResolved} />
+  {/if}
   {#if pendingApproval}
     <ToolApproval approval={pendingApproval} onResolved={handleApprovalResolved} />
   {/if}

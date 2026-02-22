@@ -1,7 +1,12 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { getConnectionStatus } from "../../stores/connection.svelte";
-  import { getActiveAgent } from "../../stores/agents.svelte";
+  import { getActiveAgent, getActiveAgentId } from "../../stores/agents.svelte";
   import { getBrandName } from "../../stores/branding.svelte";
+  import { getAccessToken, logout } from "../../lib/auth";
+  import { clearToken } from "../../lib/api";
+  import { getMessages } from "../../stores/chat.svelte";
+  import { formatCost, calculateMessageCost } from "../../lib/format";
 
   type ViewId = "chat" | "metrics" | "graph" | "files" | "settings";
 
@@ -13,6 +18,45 @@
   } = $props();
 
   let agent = $derived(getActiveAgent());
+  let hasSession = $derived(!!getAccessToken());
+  let showMobileMenu = $state(false);
+  let updateAvailable = $state(false);
+  let updateVersion = $state("");
+
+  let sessionCost = $derived(() => {
+    const agentId = getActiveAgentId();
+    if (!agentId) return 0;
+    const msgs = getMessages(agentId);
+    let total = 0;
+    for (const m of msgs) {
+      if (m.turnOutcome) total += calculateMessageCost(m.turnOutcome);
+    }
+    return total;
+  });
+
+  function handleMobileNav(view: ViewId) {
+    onSetView(view);
+    showMobileMenu = false;
+  }
+
+  async function handleLogout() {
+    await logout();
+    clearToken();
+    location.reload();
+  }
+
+  onMount(async () => {
+    try {
+      const res = await fetch("/api/system/update-status");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.available) {
+          updateAvailable = true;
+          updateVersion = data.latest ?? "";
+        }
+      }
+    } catch { /* ignore */ }
+  });
 </script>
 
 <header class="topbar">
@@ -29,18 +73,24 @@
         <line x1="6.5" y1="2" x2="6.5" y2="16" stroke="currentColor" stroke-width="1.5"/>
       </svg>
     </button>
-    <h1 class="title">{getBrandName()}</h1>
+    <h1 class="title desktop-only">{getBrandName()}</h1>
     <span class="status-dot" class:connected={getConnectionStatus() === "connected"} class:connecting={getConnectionStatus() === "connecting"}></span>
     {#if agent}
       <span class="active-agent">
         {#if agent.emoji}
           <span class="agent-emoji">{agent.emoji}</span>
         {/if}
-        {agent.name}
+        <span class="agent-name">{agent.name}</span>
       </span>
     {/if}
+    {#if sessionCost() > 0}
+      <span class="session-cost" title="Running session cost">{formatCost(sessionCost())}</span>
+    {/if}
+    {#if updateAvailable}
+      <span class="update-badge" title="Update available: v{updateVersion}">v{updateVersion}</span>
+    {/if}
   </div>
-  <div class="right">
+  <div class="right desktop-nav">
     <button class="topbar-btn" class:active={activeView === "files"} onclick={() => onSetView(activeView === "files" ? "chat" : "files")}>
       Files
     </button>
@@ -53,8 +103,53 @@
     <button class="topbar-btn" class:active={activeView === "settings"} onclick={() => onSetView(activeView === "settings" ? "chat" : "settings")}>
       Settings
     </button>
+    {#if hasSession}
+      <button class="topbar-btn logout-btn" onclick={handleLogout}>
+        Logout
+      </button>
+    {/if}
+  </div>
+  <div class="right mobile-nav">
+    <button
+      class="mobile-menu-btn"
+      class:active={showMobileMenu}
+      onclick={() => showMobileMenu = !showMobileMenu}
+      aria-label="Toggle navigation"
+    >
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+        {#if showMobileMenu}
+          <line x1="4" y1="4" x2="16" y2="16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          <line x1="16" y1="4" x2="4" y2="16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        {:else}
+          <circle cx="10" cy="5" r="1.5" fill="currentColor"/>
+          <circle cx="10" cy="10" r="1.5" fill="currentColor"/>
+          <circle cx="10" cy="15" r="1.5" fill="currentColor"/>
+        {/if}
+      </svg>
+    </button>
   </div>
 </header>
+
+{#if showMobileMenu}
+  <button class="mobile-menu-overlay" onclick={() => showMobileMenu = false} aria-label="Close menu"></button>
+  <div class="mobile-menu">
+    <button class="mobile-menu-item" class:active={activeView === "chat"} onclick={() => handleMobileNav("chat")}>
+      <span class="mm-icon">💬</span> Chat
+    </button>
+    <button class="mobile-menu-item" class:active={activeView === "files"} onclick={() => handleMobileNav(activeView === "files" ? "chat" : "files")}>
+      <span class="mm-icon">📁</span> Files
+    </button>
+    <button class="mobile-menu-item" class:active={activeView === "metrics"} onclick={() => handleMobileNav(activeView === "metrics" ? "chat" : "metrics")}>
+      <span class="mm-icon">📊</span> Metrics
+    </button>
+    <button class="mobile-menu-item" class:active={activeView === "graph"} onclick={() => handleMobileNav(activeView === "graph" ? "chat" : "graph")}>
+      <span class="mm-icon">🕸️</span> Graph
+    </button>
+    <button class="mobile-menu-item" class:active={activeView === "settings"} onclick={() => handleMobileNav(activeView === "settings" ? "chat" : "settings")}>
+      <span class="mm-icon">⚙️</span> Settings
+    </button>
+  </div>
+{/if}
 
 
 <style>
@@ -64,6 +159,7 @@
     justify-content: space-between;
     height: var(--topbar-height);
     padding: 0 16px;
+    padding-top: var(--safe-top);
     border-bottom: 1px solid var(--border);
     background: var(--bg-elevated);
     flex-shrink: 0;
@@ -72,6 +168,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    min-width: 0;
   }
   .sidebar-toggle {
     display: flex;
@@ -83,7 +180,8 @@
     border: 1px solid transparent;
     border-radius: var(--radius-sm);
     color: var(--text-muted);
-    transition: color 0.15s, background 0.15s, border-color 0.15s;
+    transition: color var(--transition-quick), background var(--transition-quick), border-color var(--transition-quick);
+    flex-shrink: 0;
   }
   .sidebar-toggle:hover {
     color: var(--text);
@@ -93,21 +191,24 @@
     color: var(--text-secondary);
   }
   .title {
-    font-size: 16px;
-    font-weight: 600;
-    letter-spacing: -0.02em;
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
   }
   .status-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
     background: var(--text-muted);
+    flex-shrink: 0;
   }
   .status-dot.connected {
-    background: var(--green);
+    background: var(--status-success);
   }
   .status-dot.connecting {
-    background: var(--yellow);
+    background: var(--status-warning);
     animation: pulse 1.5s ease infinite;
   }
   @keyframes pulse {
@@ -115,16 +216,46 @@
     50% { opacity: 0.4; }
   }
   .active-agent {
-    font-size: 13px;
+    font-size: var(--text-sm);
     color: var(--text-secondary);
     font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
   }
   .agent-emoji {
-    font-size: 14px;
+    font-size: var(--text-base);
+    flex-shrink: 0;
+  }
+  .agent-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .session-cost {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1px 6px;
+  }
+  .update-badge {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--status-success);
+    background: color-mix(in srgb, var(--status-success) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--status-success) 30%, transparent);
+    border-radius: var(--radius);
+    padding: 1px 6px;
+    cursor: default;
   }
   .right {
     display: flex;
     gap: 4px;
+    flex-shrink: 0;
   }
   .topbar-btn {
     background: none;
@@ -132,8 +263,8 @@
     color: var(--text-secondary);
     padding: 4px 10px;
     border-radius: var(--radius-sm);
-    font-size: 13px;
-    transition: all 0.15s;
+    font-size: var(--text-sm);
+    transition: all var(--transition-quick);
   }
   .topbar-btn:hover {
     color: var(--text);
@@ -147,5 +278,113 @@
     color: var(--accent);
     border-color: var(--border);
     background: var(--surface);
+  }
+  .logout-btn {
+    color: var(--text-muted);
+    margin-left: 4px;
+  }
+  .logout-btn:hover {
+    color: var(--status-error);
+  }
+
+  /* Mobile menu button */
+  .mobile-nav {
+    display: none;
+  }
+  .mobile-menu-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    transition: color var(--transition-quick), background var(--transition-quick);
+  }
+  .mobile-menu-btn:hover, .mobile-menu-btn.active {
+    color: var(--text);
+    background: var(--surface);
+  }
+
+  /* Mobile dropdown menu */
+  .mobile-menu-overlay {
+    display: none;
+  }
+  .mobile-menu {
+    display: none;
+  }
+
+  @media (max-width: 768px) {
+    .topbar {
+      padding: 0 12px;
+      padding-top: var(--safe-top);
+    }
+    .desktop-only {
+      display: none;
+    }
+    .desktop-nav {
+      display: none;
+    }
+    .mobile-nav {
+      display: flex;
+    }
+    .mobile-menu-overlay {
+      display: block;
+      position: fixed;
+      inset: 0;
+      top: calc(var(--topbar-height) + var(--safe-top));
+      background: rgba(0, 0, 0, 0.4);
+      z-index: 199;
+      border: none;
+      cursor: default;
+    }
+    .mobile-menu {
+      display: flex;
+      flex-direction: column;
+      position: fixed;
+      top: calc(var(--topbar-height) + var(--safe-top));
+      right: 8px;
+      z-index: 200;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-lg);
+      min-width: 160px;
+      overflow: hidden;
+      animation: menu-in 0.12s ease;
+    }
+    @keyframes menu-in {
+      from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .mobile-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      font-size: var(--text-base);
+      font-weight: 500;
+      text-align: left;
+      transition: background var(--transition-quick);
+    }
+    .mobile-menu-item:hover, .mobile-menu-item:active {
+      background: var(--surface-hover);
+    }
+    .mobile-menu-item.active {
+      color: var(--accent);
+    }
+    .mobile-menu-item:not(:last-child) {
+      border-bottom: 1px solid var(--border);
+    }
+    .mm-icon {
+      font-size: var(--text-lg);
+      width: 24px;
+      text-align: center;
+    }
   }
 </style>

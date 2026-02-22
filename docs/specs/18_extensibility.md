@@ -1,6 +1,6 @@
 # Spec: Extensibility — Hooks, Commands & Plugins
 
-**Status:** Draft
+**Status:** Complete. All 6 phases implemented (PRs #98, #107, #124).
 **Author:** Syn
 **Date:** 2026-02-21
 **Source:** Gap Analysis F-2, F-12, F-24, F-25, F-27, F-37

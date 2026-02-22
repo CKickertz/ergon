@@ -1,5 +1,9 @@
 # Spec 26: Recursive Self-Improvement
 
+**Status:** All 6 phases complete (PRs #106, #107, #128).
+**Author:** Syn
+**Date:** 2026-02-21
+
 Aletheia agents autonomously improve their own capabilities — creating tools, refining strategies, proposing code patches, and curating their own memory — within a layered safety architecture that keeps the base model frozen and gates all structural changes behind automated verification.
 
 ## Research Context

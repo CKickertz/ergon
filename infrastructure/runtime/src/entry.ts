@@ -4,7 +4,8 @@ import { Command } from "commander";
 import { startRuntime } from "./aletheia.js";
 import { createLogger } from "./koina/logger.js";
 import { getVersion } from "./version.js";
-import { runDiagnostics, applyFixes, formatResults } from "./koina/diagnostics.js";
+import { applyFixes, formatResults, runDiagnostics } from "./koina/diagnostics.js";
+import { readJson } from "./koina/fs.js";
 
 const log = createLogger("entry");
 
@@ -22,6 +23,103 @@ const program = new Command()
   .name("aletheia")
   .description("Aletheia distributed cognition runtime")
   .version(getVersion());
+
+// --- Init ---
+
+program
+  .command("init")
+  .description("First-run setup wizard — configure credentials, create first agent")
+  .action(async () => {
+    const { existsSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { paths } = await import("./taxis/paths.js");
+    const { writeJson } = await import("./koina/fs.js");
+    const { scaffoldAgent } = await import("./taxis/scaffold.js");
+    const readline = await import("node:readline");
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const ask = (q: string): Promise<string> =>
+      new Promise((resolve) => rl.question(q, resolve));
+
+    try {
+      const configPath = paths.configFile();
+
+      if (existsSync(configPath)) {
+        const answer = await ask(`Config exists at ${configPath}. Overwrite? (y/N) `);
+        if (answer.trim().toLowerCase() !== "y") {
+          console.log("Aborted.");
+          return;
+        }
+      }
+
+      // API key
+      const apiKey = (await ask("Anthropic API key (sk-ant-...): ")).trim();
+      if (!apiKey) {
+        console.error("API key is required.");
+        return;
+      }
+
+      // Gateway port
+      const portStr = (await ask("Gateway port [18789]: ")).trim();
+      const port = portStr ? parseInt(portStr, 10) : 18789;
+      if (isNaN(port) || port < 1 || port > 65535) {
+        console.error("Invalid port number.");
+        return;
+      }
+
+      // First agent
+      const agentName = (await ask("First agent name (e.g. Atlas): ")).trim();
+      if (!agentName) {
+        console.error("Agent name is required.");
+        return;
+      }
+      const agentId = agentName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      const agentEmoji = (await ask("Agent emoji [🤖]: ")).trim() || "🤖";
+
+      // Write credentials
+      const credDir = join(paths.configDir(), "credentials");
+      mkdirSync(credDir, { recursive: true });
+      const credPath = join(credDir, "anthropic.json");
+      writeFileSync(credPath, JSON.stringify({ apiKey }, null, 2) + "\n", { mode: 0o600 });
+      console.log(`  Credentials: ${credPath}`);
+
+      // Write base config (scaffoldAgent will append agent + binding)
+      mkdirSync(paths.configDir(), { recursive: true });
+      writeJson(configPath, {
+        agents: { defaults: {}, list: [] },
+        bindings: [],
+        gateway: { port },
+      });
+
+      // Scaffold agent
+      mkdirSync(paths.nous, { recursive: true });
+      const templateDir = join(paths.nous, "_example");
+      if (!existsSync(templateDir)) {
+        mkdirSync(templateDir, { recursive: true });
+      }
+
+      const result = scaffoldAgent({
+        id: agentId,
+        name: agentName,
+        emoji: agentEmoji,
+        nousDir: paths.nous,
+        configPath,
+        templateDir,
+      });
+
+      console.log(`\nSetup complete.`);
+      console.log(`  Config: ${configPath}`);
+      console.log(`  Agent: ${agentName} (${agentId}) → ${result.workspace}`);
+      console.log(`\nStart the gateway:`);
+      console.log(`  aletheia gateway start`);
+      console.log(`\nThen open:`);
+      console.log(`  http://localhost:${port}/ui`);
+    } finally {
+      rl.close();
+    }
+  });
+
+// --- Gateway ---
 
 const gateway = program
   .command("gateway")
@@ -408,6 +506,151 @@ program
     },
   );
 
+// --- Session Forking ---
+
+program
+  .command("fork")
+  .description("Fork a session from a historical distillation checkpoint")
+  .argument("<session-id>", "Session ID to fork")
+  .requiredOption("--at <number>", "Distillation checkpoint number to fork from")
+  .action(async (sessionId: string, opts: { at: string }) => {
+    const distillationNumber = parseInt(opts.at, 10);
+    if (isNaN(distillationNumber) || distillationNumber < 1) {
+      console.error("--at must be a positive integer (distillation number)");
+      process.exit(1);
+    }
+
+    const { SessionStore } = await import("./mneme/store.js");
+    const { paths } = await import("./taxis/paths.js");
+    const store = new SessionStore(paths.sessionsDb());
+    try {
+      const result = store.forkSession(sessionId, distillationNumber);
+      console.log(`Forked session: ${result.newSessionId}`);
+      console.log(`  Source: ${sessionId} @ distillation #${distillationNumber}`);
+      console.log(`  Messages copied: ${result.messagesCopied}`);
+    } catch (err) {
+      console.error(`Fork failed: ${err instanceof Error ? err.message : err}`);
+      process.exit(1);
+    } finally {
+      store.close();
+    }
+  });
+
+// --- Agent Management ---
+
+const agentCmd = program.command("agent").description("Agent management");
+
+agentCmd
+  .command("create")
+  .description("Scaffold a new agent workspace with onboarding")
+  .option("--id <id>", "Agent ID (lowercase, alphanumeric, hyphens)")
+  .option("--name <name>", "Agent display name")
+  .option("--emoji <emoji>", "Agent emoji")
+  .action(async (opts: { id?: string; name?: string; emoji?: string }) => {
+    const { paths } = await import("./taxis/paths.js");
+    const { scaffoldAgent, validateAgentId } = await import("./taxis/scaffold.js");
+    const { join } = await import("node:path");
+
+    let id = opts.id;
+    let name = opts.name;
+
+    if (!id || !name) {
+      const readline = await import("node:readline");
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const ask = (q: string): Promise<string> =>
+        new Promise((resolve) => rl.question(q, resolve));
+
+      if (!id) {
+        id = (await ask("Agent ID (e.g. atlas): ")).trim();
+        const check = validateAgentId(id);
+        if (!check.valid) {
+          console.error(`Invalid ID: ${check.reason}`);
+          rl.close();
+          process.exit(1);
+        }
+      }
+      if (!name) {
+        name = (await ask("Display name: ")).trim();
+        if (!name) { name = id.charAt(0).toUpperCase() + id.slice(1); }
+      }
+      rl.close();
+    }
+
+    try {
+      const scaffoldOpts = {
+        id,
+        name,
+        nousDir: paths.nous,
+        configPath: paths.configFile(),
+        templateDir: join(paths.nous, "_example"),
+        ...(opts.emoji ? { emoji: opts.emoji } : {}),
+      };
+      const result = scaffoldAgent(scaffoldOpts);
+      console.log(`Created agent "${name}" (${id})`);
+      console.log(`  Workspace: ${result.workspace}`);
+      console.log(`  Files: ${result.filesCreated.join(", ")}`);
+      console.log(`\nStart onboarding: open the web UI and select ${name}.`);
+    } catch (err) {
+      console.error(`Failed: ${err instanceof Error ? err.message : err}`);
+      process.exit(1);
+    }
+  });
+
+// --- Plugins ---
+
+const pluginsCmd = program.command("plugins").description("Plugin management");
+
+pluginsCmd
+  .command("list")
+  .description("List discovered and configured plugins")
+  .action(async () => {
+    const { existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { paths } = await import("./taxis/paths.js");
+    const { loadConfig } = await import("./taxis/loader.js");
+
+    const config = loadConfig();
+    const rootDir = paths.pluginRoot;
+
+    console.log(`Plugin root: ${rootDir}\n`);
+
+    // Discover plugins from root directory
+    const discovered: Array<{ id: string; version: string; path: string; source: string }> = [];
+
+    if (existsSync(rootDir)) {
+      const { discoverPlugins } = await import("./prostheke/loader.js");
+      const found = await discoverPlugins(rootDir);
+      for (const p of found) {
+        discovered.push({ id: p.manifest.id, version: p.manifest.version, path: rootDir, source: "discovered" });
+      }
+    }
+
+    // Configured explicit paths
+    for (const p of config.plugins.load.paths) {
+      const exists = existsSync(p);
+      if (exists) {
+        const manifestPath = join(p, "manifest.json");
+        const manifest = readJson(manifestPath) as { id?: string; version?: string } | null;
+        if (manifest?.id) {
+          discovered.push({ id: manifest.id, version: manifest.version ?? "?", path: p, source: "config" });
+        }
+      } else {
+        discovered.push({ id: "(missing)", version: "-", path: p, source: "config" });
+      }
+    }
+
+    if (discovered.length === 0) {
+      console.log("No plugins found.");
+      return;
+    }
+
+    for (const p of discovered) {
+      const enabled = config.plugins.entries[p.id]?.enabled !== false;
+      const status = p.id === "(missing)" ? "MISSING" : enabled ? "enabled" : "disabled";
+      console.log(`  ${p.id} v${p.version} [${status}] (${p.source}: ${p.path})`);
+    }
+  });
+
 // --- Update ---
 
 program
@@ -445,6 +688,60 @@ program
     },
   );
 
+// --- Import ---
+
+program
+  .command("import")
+  .description("Import an agent from an AgentFile JSON export")
+  .argument("<file>", "Path to .agent.json file")
+  .option("--nous-id <id>", "Override agent ID (for cloning)")
+  .option("--skip-sessions", "Skip session/message import")
+  .option("--skip-workspace", "Skip workspace file restoration")
+  .action(async (file: string, opts: { nousId?: string; skipSessions?: boolean; skipWorkspace?: boolean }) => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const { SessionStore } = await import("./mneme/store.js");
+    const { paths } = await import("./taxis/paths.js");
+    const { importAgent } = await import("./portability/import.js");
+
+    const filePath = resolve(file);
+    let raw: string;
+    try {
+      raw = readFileSync(filePath, "utf-8");
+    } catch (err) {
+      console.error(`Cannot read file: ${filePath}`);
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+
+    let agentFile: import("./portability/export.js").AgentFile;
+    try {
+      agentFile = JSON.parse(raw);
+    } catch { /* invalid JSON in agent file */
+      console.error("Invalid JSON in agent file");
+      process.exit(1);
+    }
+
+    const store = new SessionStore(paths.sessionsDb());
+    try {
+      console.log(`Importing agent from: ${filePath}`);
+      const importOpts: import("./portability/import.js").ImportOptions = {};
+      if (opts.nousId) importOpts.targetNousId = opts.nousId;
+      if (opts.skipSessions) importOpts.skipSessions = opts.skipSessions;
+      if (opts.skipWorkspace) importOpts.skipWorkspace = opts.skipWorkspace;
+      const result = await importAgent(agentFile, store, importOpts);
+
+      console.log(`\nImport complete:`);
+      console.log(`  Agent: ${result.nousId}`);
+      console.log(`  Files: ${result.filesRestored}`);
+      console.log(`  Sessions: ${result.sessionsImported}`);
+      console.log(`  Messages: ${result.messagesImported}`);
+      console.log(`  Notes: ${result.notesImported}`);
+    } finally {
+      store.close();
+    }
+  });
+
 // --- Token Audit ---
 
 program
@@ -454,6 +751,53 @@ program
     const { auditTokens } = await import("./nous/audit.js");
     const id = agentId ?? "main";
     await auditTokens(id);
+  });
+
+// --- Audit Chain ---
+
+const auditCmd = program.command("audit").description("Audit log management");
+
+auditCmd
+  .command("verify")
+  .description("Verify audit trail hash chain integrity")
+  .action(async () => {
+    const Database = (await import("better-sqlite3")).default;
+    const { paths } = await import("./taxis/paths.js");
+    const { verifyAuditChain } = await import("./auth/audit-verify.js");
+
+    const dbPath = paths.sessionsDb();
+    let db: InstanceType<typeof Database>;
+    try {
+      db = new Database(dbPath, { readonly: true });
+    } catch (err) {
+      console.error(`Cannot open database: ${dbPath}`);
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+
+    try {
+      const result = verifyAuditChain(db);
+
+      if (result.totalEntries === 0) {
+        console.log("Audit log is empty — nothing to verify.");
+        process.exit(0);
+      }
+
+      console.log(`Audit chain verification:`);
+      console.log(`  Entries: ${result.totalEntries} total, ${result.checkedEntries} with checksums`);
+      console.log(`  Range: ${result.firstEntry} → ${result.lastEntry}`);
+
+      if (result.valid) {
+        console.log(`  Status: VALID`);
+        process.exit(0);
+      } else {
+        console.log(`  Status: TAMPERED`);
+        console.log(`  Detail: ${result.tamperDetails}`);
+        process.exit(1);
+      }
+    } finally {
+      db.close();
+    }
   });
 
 // --- Auth Migration ---
@@ -474,7 +818,7 @@ program
     let raw: string;
     try {
       raw = readFileSync(configPath, "utf-8");
-    } catch {
+    } catch { /* config file unreadable */
       console.error(`Cannot read config: ${configPath}`);
       process.exit(1);
     }
@@ -482,7 +826,7 @@ program
     let config: Record<string, unknown>;
     try {
       config = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
+    } catch { /* invalid JSON in config */
       console.error("Invalid JSON in config file");
       process.exit(1);
     }

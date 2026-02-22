@@ -1,7 +1,7 @@
 // Main orchestration — wire all modules
 import { join } from "node:path";
 import { createLogger } from "./koina/logger.js";
-import { applyEnv, loadConfig } from "./taxis/loader.js";
+import { applyEnv, loadConfig, watchConfig } from "./taxis/loader.js";
 import { paths } from "./taxis/paths.js";
 import { SessionStore } from "./mneme/store.js";
 import { createDefaultRouter, type ProviderRouter } from "./hermeneus/router.js";
@@ -20,6 +20,8 @@ import { mem0SearchTool } from "./organon/built-in/mem0-search.js";
 import { factRetractTool } from "./organon/built-in/fact-retract.js";
 import { memoryCorrectTool } from "./organon/built-in/memory-correct.js";
 import { memoryForgetTool } from "./organon/built-in/memory-forget.js";
+import { mem0RetractTool } from "./organon/built-in/mem0-retract.js";
+import { mem0AuditTool } from "./organon/built-in/mem0-audit.js";
 import { browserTool, closeBrowser } from "./organon/built-in/browser.js";
 import { createMessageTool } from "./organon/built-in/message.js";
 import { createVoiceReplyTool } from "./organon/built-in/voice-reply.js";
@@ -31,8 +33,10 @@ import { createSessionsDispatchTool } from "./organon/built-in/sessions-dispatch
 import { createConfigReadTool } from "./organon/built-in/config-read.js";
 import { createSessionStatusTool } from "./organon/built-in/session-status.js";
 import { createPlanTools } from "./organon/built-in/plan.js";
+import { createPlanProposeHandler } from "./organon/built-in/plan-propose.js";
 import { traceLookupTool } from "./organon/built-in/trace-lookup.js";
 import { createCheckCalibrationTool } from "./organon/built-in/check-calibration.js";
+import { createSelfEvaluateTool } from "./organon/built-in/self-evaluate.js";
 import { createWhatDoIKnowTool } from "./organon/built-in/what-do-i-know.js";
 import { createRecentCorrectionsTool } from "./organon/built-in/recent-corrections.js";
 import { createBlackboardTool } from "./organon/built-in/blackboard.js";
@@ -42,9 +46,12 @@ import { createStatusReportTool } from "./organon/built-in/status-report.js";
 import { createResearchTool } from "./organon/built-in/research.js";
 import { createDeliberateTool } from "./organon/built-in/deliberate.js";
 import { createSelfAuthorTools, loadAuthoredTools } from "./organon/self-author.js";
+import { createPatchTools } from "./organon/built-in/propose-patch.js";
+import { createPipelineConfigTool } from "./organon/built-in/pipeline-config.js";
+import { loadCustomCommands, registerCustomCommands } from "./organon/custom-commands.js";
 import { NousManager } from "./nous/manager.js";
 import { McpClientManager } from "./organon/mcp-client.js";
-import { createGateway, setCommandsRef, setCronRef, setMcpRef, setSkillsRef, setWatchdogRef, startGateway, type GatewayAuthDeps } from "./pylon/server.js";
+import { createGateway, type GatewayAuthDeps, setCommandsRef, setCronRef, setMcpRef, setSkillsRef, setWatchdogRef, startGateway } from "./pylon/server.js";
 import { AuthSessionStore } from "./auth/sessions.js";
 import { AuditLog } from "./auth/audit.js";
 import { generateSecret } from "./auth/tokens.js";
@@ -61,10 +68,11 @@ import { startListener } from "./semeion/listener.js";
 import { initSenderPii, parseTarget, sendMessage } from "./semeion/sender.js";
 import { createDefaultRegistry } from "./semeion/commands.js";
 import { SkillRegistry } from "./organon/skills.js";
-import { loadPlugins } from "./prostheke/loader.js";
+import { discoverPlugins, loadPlugins } from "./prostheke/loader.js";
 import { PluginRegistry } from "./prostheke/registry.js";
 import { CronScheduler } from "./daemon/cron.js";
 import { runNightlyReflection, runWeeklyReflection } from "./daemon/reflection-cron.js";
+import { runEvolutionCycle } from "./daemon/evolution-cron.js";
 import { runRetention } from "./daemon/retention.js";
 import { type ServiceProbe, Watchdog } from "./daemon/watchdog.js";
 import { startUpdateChecker } from "./daemon/update-check.js";
@@ -73,10 +81,24 @@ import { CompetenceModel } from "./nous/competence.js";
 import { UncertaintyTracker } from "./nous/uncertainty.js";
 import type { AletheiaConfig } from "./taxis/schema.js";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { getKeySalt, initEncryption } from "./koina/encryption.js";
 import Database from "better-sqlite3";
 import { eventBus } from "./koina/event-bus.js";
+import { type HookRegistry, registerHooks } from "./koina/hooks.js";
 
 const log = createLogger("aletheia");
+
+type RoutingEntry = { channel: string; peerKind?: string; peerId?: string; accountId?: string; nousId: string };
+
+function extractBindings(config: AletheiaConfig): RoutingEntry[] {
+  return config.bindings.map((b) => {
+    const entry: RoutingEntry = { channel: b.match.channel, nousId: b.agentId };
+    if (b.match.peer?.kind) entry.peerKind = b.match.peer.kind;
+    if (b.match.peer?.id) entry.peerId = b.match.peer.id;
+    if (b.match.accountId) entry.accountId = b.match.accountId;
+    return entry;
+  });
+}
 
 export interface AletheiaRuntime {
   config: AletheiaConfig;
@@ -97,6 +119,26 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
 
   applyEnv(config);
 
+  // Initialize encryption before store (store uses encryptIfEnabled/decryptIfNeeded)
+  if (config.encryption.enabled) {
+    const passphrase = process.env[config.encryption.keyEnvVar];
+    if (!passphrase) {
+      log.warn(`Encryption enabled but ${config.encryption.keyEnvVar} not set — messages will NOT be encrypted`);
+    } else {
+      const saltPath = join(paths.configDir(), "encryption.salt");
+      let salt: string | undefined;
+      if (existsSync(saltPath)) {
+        salt = readFileSync(saltPath, "utf-8").trim();
+      }
+      initEncryption(passphrase, salt);
+      if (!salt) {
+        writeFileSync(saltPath, getKeySalt()!, { mode: 0o600 });
+      }
+      try { chmodSync(saltPath, 0o600); } catch { /* may already be correct */ }
+      log.info("Message encryption active");
+    }
+  }
+
   const store = new SessionStore(paths.sessionsDb());
 
   // Harden file permissions on sensitive files at startup
@@ -106,7 +148,7 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
     for (const p of [dbPath, cfgPath]) {
       try {
         if (existsSync(p)) chmodSync(p, 0o600);
-      } catch {
+      } catch { /* salt file creation failed — non-fatal */
         log.warn(`Could not harden permissions on ${p}`);
       }
     }
@@ -142,6 +184,8 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
   tools.register({ ...factRetractTool, category: "available" as const });
   tools.register({ ...memoryCorrectTool, category: "available" as const });
   tools.register({ ...memoryForgetTool, category: "available" as const });
+  tools.register({ ...mem0RetractTool, category: "available" as const });
+  tools.register({ ...mem0AuditTool, category: "available" as const });
   tools.register({ ...traceLookupTool, category: "available" as const });
 
   // Browser (requires chromium on host)
@@ -159,10 +203,14 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
   tools.register(sessionStatusTool);
 
   // Planning tools (available on-demand)
-  for (const planTool of createPlanTools()) {
+  for (const planTool of createPlanTools(store)) {
     planTool.category = "available";
     tools.register(planTool);
   }
+
+  // Plan proposal tool (always available)
+  const planProposeHandler = createPlanProposeHandler();
+  tools.register(planProposeHandler);
 
   // Self-authoring tools (available on-demand)
   const defaultWorkspace = config.agents.list[0]?.workspace ?? "/tmp";
@@ -172,6 +220,12 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
   }
   const authoredCount = loadAuthoredTools(defaultWorkspace, tools);
   if (authoredCount > 0) log.info(`Loaded ${authoredCount} authored tools`);
+
+  // Runtime code patching tools (available on-demand)
+  for (const patchTool of createPatchTools()) {
+    patchTool.category = "available";
+    tools.register(patchTool);
+  }
 
   // enable_tool meta-tool — lets agents activate available tools on demand
   const enableToolHandler: import("./organon/registry.js").ToolHandler = {
@@ -199,17 +253,7 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
 
   log.info(`Registered ${tools.size} tools`);
 
-  const bindings = config.bindings.map((b) => {
-    const entry: { channel: string; peerKind?: string; peerId?: string; accountId?: string; nousId: string } = {
-      channel: b.match.channel,
-      nousId: b.agentId,
-    };
-    if (b.match.peer?.kind) entry.peerKind = b.match.peer.kind;
-    if (b.match.peer?.id) entry.peerId = b.match.peer.id;
-    if (b.match.accountId) entry.accountId = b.match.accountId;
-    return entry;
-  });
-  store.rebuildRoutingCache(bindings);
+  store.rebuildRoutingCache(extractBindings(config));
   store.migrateSessionsToThreads();
 
   const manager = new NousManager(config, store, router, tools);
@@ -267,6 +311,14 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
   const correctionsTool = createRecentCorrectionsTool(store);
   correctionsTool.category = "available";
   tools.register(correctionsTool);
+  const selfEvalTool = createSelfEvaluateTool(store, competence, uncertainty);
+  selfEvalTool.category = "available";
+  tools.register(selfEvalTool);
+
+  // Pipeline self-configuration — agents tune recall, tool expiry, note budget
+  const pipelineCfgTool = createPipelineConfigTool();
+  pipelineCfgTool.category = "available";
+  tools.register(pipelineCfgTool);
 
   // Cross-agent blackboard — persistent shared state with auto-expiry
   tools.register(createBlackboardTool(store));
@@ -318,8 +370,20 @@ export async function startRuntime(configPath?: string): Promise<void> {
   const config = runtime.config;
 
   // --- Plugins ---
-  if (config.plugins.enabled && config.plugins.load.paths.length > 0) {
-    const pluginDefs = await loadPlugins(config.plugins.load.paths);
+  if (config.plugins.enabled) {
+    const pluginDefs = config.plugins.load.paths.length > 0
+      ? await loadPlugins(config.plugins.load.paths)
+      : [];
+
+    // Auto-discover plugins from plugin root directory
+    const discovered = await discoverPlugins(paths.pluginRoot);
+    const loadedIds = new Set(pluginDefs.map((p) => p.manifest.id));
+    for (const dp of discovered) {
+      if (!loadedIds.has(dp.manifest.id)) {
+        pluginDefs.push(dp);
+      }
+    }
+
     for (const plugin of pluginDefs) {
       const entry = config.plugins.entries[plugin.manifest.id];
       if (entry && !entry.enabled) {
@@ -328,9 +392,26 @@ export async function startRuntime(configPath?: string): Promise<void> {
       }
       runtime.plugins.register(plugin, runtime.tools);
     }
-    log.info(`Loaded ${runtime.plugins.size} plugins`);
-    runtime.manager.setPlugins(runtime.plugins);
-    await runtime.plugins.dispatchStart();
+    if (runtime.plugins.size > 0) {
+      log.info(`Loaded ${runtime.plugins.size} plugins`);
+      runtime.manager.setPlugins(runtime.plugins);
+      await runtime.plugins.dispatchStart();
+    }
+  }
+
+  // --- Declarative Hooks ---
+  // Load YAML hook definitions from shared/hooks/ and wire to event bus.
+  // These run shell commands at lifecycle points — no TypeScript required.
+  const hooksDir = join(paths.shared, "hooks");
+  const hookRegistry = registerHooks(hooksDir);
+  // Also load per-nous hooks from each agent workspace (nous/<id>/hooks/)
+  const perNousHookRegistries: HookRegistry[] = [];
+  for (const agent of config.agents.list) {
+    const agentHooksDir = join(paths.nous, agent.id, "hooks");
+    const agentHooks = registerHooks(agentHooksDir);
+    if (agentHooks.hooks.length > 0) {
+      perNousHookRegistries.push(agentHooks);
+    }
   }
 
   // --- Auth ---
@@ -378,7 +459,7 @@ export async function startRuntime(configPath?: string): Promise<void> {
   // Wire event bus → SSE push for real-time UI updates
   for (const eventName of [
     "turn:before", "turn:after", "tool:called", "tool:failed",
-    "session:created", "session:archived",
+    "session:created", "session:archived", "config:reloaded",
   ] as const) {
     eventBus.on(eventName, (payload) => broadcastEvent(eventName, payload));
   }
@@ -391,7 +472,7 @@ export async function startRuntime(configPath?: string): Promise<void> {
         const durMs = payload["durationMs"] as number | undefined;
         runtime.store.recordToolStat({
           nousId: (payload["nousId"] as string) ?? "unknown",
-          toolName: (payload["name"] as string) ?? "unknown",
+          toolName: (payload["tool"] as string) ?? "unknown",
           success: eventName === "tool:called",
           ...(errMsg ? { errorMessage: errMsg } : {}),
           ...(durMs !== null && durMs !== undefined ? { durationMs: durMs } : {}),
@@ -428,6 +509,11 @@ export async function startRuntime(configPath?: string): Promise<void> {
 
   // --- Command Registry ---
   const commandRegistry = createDefaultRegistry();
+  const customCmds = loadCustomCommands(join(paths.shared, "commands"));
+  if (customCmds.length > 0) {
+    const registered = registerCustomCommands(customCmds, commandRegistry, runtime.manager);
+    log.info(`Loaded ${registered} custom commands from shared/commands/`);
+  }
   setCommandsRef(commandRegistry);
 
   // --- Signal ---
@@ -563,6 +649,65 @@ export async function startRuntime(configPath?: string): Promise<void> {
     return `Weekly reflection: ${result.agentsReflected} agents, ${result.totalFindings} findings`;
   });
 
+  // Backup cron command — exports all agents to JSON files with retention
+  cron.registerCommand("backup:all-agents", async () => {
+    const { mkdirSync: mkdirBackup, readdirSync: readdirBackup, unlinkSync: unlinkBackup } = await import("node:fs");
+    const { exportAgent, agentFileToJson } = await import("./portability/export.js");
+    const dest = config.backup.destination;
+    mkdirBackup(dest, { recursive: true });
+
+    const date = new Date().toISOString().split("T")[0];
+    let count = 0;
+
+    for (const agent of config.agents.list) {
+      try {
+        const agentFile = await exportAgent(agent.id, agent as unknown as Record<string, unknown>, runtime.store);
+        const filename = `${agent.id}-${date}.agent.json`;
+        const { writeFileSync: writeBackup } = await import("node:fs");
+        const { join: joinPath } = await import("node:path");
+        writeBackup(joinPath(dest, filename), agentFileToJson(agentFile, false));
+        count++;
+      } catch (err) {
+        log.warn(`Backup failed for ${agent.id}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    // Retention — delete old .agent.json files
+    const cutoff = Date.now() - config.backup.retentionDays * 24 * 60 * 60 * 1000;
+    try {
+      const { statSync: statBackup } = await import("node:fs");
+      const { join: joinPath } = await import("node:path");
+      for (const file of readdirBackup(dest)) {
+        if (!file.endsWith(".agent.json")) continue;
+        const filePath = joinPath(dest, file);
+        const stat = statBackup(filePath);
+        if (stat.mtimeMs < cutoff) {
+          unlinkBackup(filePath);
+          log.debug(`Deleted old backup: ${file}`);
+        }
+      }
+    } catch { /* retention cleanup is best-effort */ }
+
+    return `Backed up ${count} agents to ${dest}`;
+  });
+
+  // Evolutionary config search — mutate pipeline configs, benchmark, promote winners
+  cron.registerCommand("evolution:nightly", async () => {
+    const opts: Parameters<typeof runEvolutionCycle>[3] = {};
+    if (clients.size > 0 && config.watchdog?.alertRecipient) {
+      const alertRecipient = config.watchdog.alertRecipient;
+      const client = clients.values().next().value!;
+      const accountId = clients.keys().next().value!;
+      const account = config.channels.signal.accounts[accountId]!;
+      const accountPhone = account.account ?? accountId;
+      opts.sendNotification = async (_nousId, message) => {
+        await sendMessage(client, { account: accountPhone, recipient: alertRecipient }, message, { markdown: false });
+      };
+    }
+    const result = await runEvolutionCycle(runtime.store, runtime.router, config, opts);
+    return `Evolution: ${result.agentsProcessed} agents, ${result.variantsCreated} variants, ${result.promotions} promotions`;
+  });
+
   if (config.cron.enabled) {
     cron.start();
   }
@@ -622,6 +767,18 @@ export async function startRuntime(configPath?: string): Promise<void> {
   // --- Update checker ---
   const updateCheckTimer = startUpdateChecker(runtime.store, getVersion());
 
+  // --- Config hot-reload ---
+  const configWatcher = watchConfig(configPath, (newConfig) => {
+    const diff = runtime.manager.reloadConfig(newConfig);
+
+    // Rebuild routing cache with new bindings
+    const newBindings = extractBindings(newConfig);
+    runtime.store.rebuildRoutingCache(newBindings);
+
+    eventBus.emit("config:reloaded", { added: diff.added, removed: diff.removed });
+    log.info(`Config reloaded: +${diff.added.length} -${diff.removed.length} agents, ${newBindings.length} bindings`);
+  });
+
   // --- Shutdown ---
   let draining = false;
   runtime.manager.isDraining = () => draining;
@@ -633,6 +790,7 @@ export async function startRuntime(configPath?: string): Promise<void> {
     clearInterval(spawnCleanupTimer);
     clearInterval(retentionTimer);
     clearInterval(updateCheckTimer);
+    configWatcher?.close();
     watchdog?.stop();
     cron.stop();
 
@@ -652,6 +810,8 @@ export async function startRuntime(configPath?: string): Promise<void> {
     }
     await closeBrowser().catch(() => {});
     await runtime.plugins.dispatchShutdown();
+    hookRegistry.teardown();
+    for (const reg of perNousHookRegistries) reg.teardown();
     runtime.shutdown();
     process.exit(0);
   };

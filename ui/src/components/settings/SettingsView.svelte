@@ -4,6 +4,9 @@
   import { getAgents } from "../../stores/agents.svelte";
   import { onMount } from "svelte";
   import type { Agent, MetricsData } from "../../lib/types";
+  import CostDashboard from "../CostDashboard.svelte";
+  import SessionManager from "./SessionManager.svelte";
+  import { fetchAuthMode, getAccessToken, logout as sessionLogout } from "../../lib/auth";
 
   const THEME_KEY = "aletheia_theme";
   const FONT_SIZE_KEY = "aletheia_font_size";
@@ -11,6 +14,7 @@
   let tokenInput = $state(getToken() ?? "");
   let agents = $state<Agent[]>([]);
   let metrics = $state<MetricsData | null>(null);
+  let isSessionAuth = $state(false);
   let theme = $state<"dark" | "light">(
     (localStorage.getItem(THEME_KEY) as "dark" | "light") ?? "dark",
   );
@@ -21,7 +25,9 @@
   onMount(async () => {
     agents = getAgents();
     try {
-      metrics = await fetchMetrics();
+      const [m, mode] = await Promise.all([fetchMetrics(), fetchAuthMode()]);
+      metrics = m;
+      isSessionAuth = mode.sessionAuth;
     } catch {
       // metrics unavailable
     }
@@ -34,7 +40,10 @@
     }
   }
 
-  function logout() {
+  async function logout() {
+    if (getAccessToken()) {
+      await sessionLogout();
+    }
     clearToken();
     location.reload();
   }
@@ -119,30 +128,37 @@
       <div class="setting-row">
         <span class="setting-label">Font size</span>
         <div class="font-size-control">
-          <button class="size-btn" onclick={() => setFontSize(Math.max(11, fontSize - 1))}>−</button>
+          <button class="size-btn" onclick={() => setFontSize(Math.max(11, fontSize - 1))} aria-label="Decrease font size">−</button>
           <span class="size-value">{fontSize}px</span>
-          <button class="size-btn" onclick={() => setFontSize(Math.min(20, fontSize + 1))}>+</button>
+          <button class="size-btn" onclick={() => setFontSize(Math.min(20, fontSize + 1))} aria-label="Increase font size">+</button>
         </div>
       </div>
     </section>
 
     <section class="settings-section">
       <h3 class="section-title">Authentication</h3>
-      <div class="auth-form">
-        <label class="settings-label">
-          Gateway Token
-          <input
-            type="password"
-            class="settings-input"
-            bind:value={tokenInput}
-            placeholder="Enter gateway auth token"
-          />
-        </label>
-        <div class="auth-actions">
-          <button class="btn-primary" onclick={saveToken}>Save Token</button>
+      {#if isSessionAuth}
+        <div class="auth-actions" style="margin-bottom: 8px">
           <button class="btn-danger" onclick={logout}>Logout</button>
         </div>
-      </div>
+        <SessionManager />
+      {:else}
+        <div class="auth-form">
+          <label class="settings-label">
+            Gateway Token
+            <input
+              type="password"
+              class="settings-input"
+              bind:value={tokenInput}
+              placeholder="Enter gateway auth token"
+            />
+          </label>
+          <div class="auth-actions">
+            <button class="btn-primary" onclick={saveToken}>Save Token</button>
+            <button class="btn-danger" onclick={logout}>Logout</button>
+          </div>
+        </div>
+      {/if}
     </section>
 
     {#if metrics}
@@ -164,6 +180,10 @@
           <span class="setting-label">Cache hit rate</span>
           <span class="setting-value mono">{metrics.usage.cacheHitRate}%</span>
         </div>
+      </section>
+
+      <section class="settings-section cost-section">
+        <CostDashboard />
       </section>
 
       {#if metrics.services.length > 0}
@@ -195,7 +215,7 @@
     margin: 0 auto;
   }
   .settings-heading {
-    font-size: 20px;
+    font-size: var(--text-xl);
     font-weight: 600;
     margin-bottom: 24px;
   }
@@ -207,7 +227,7 @@
     padding: 16px;
   }
   .section-title {
-    font-size: 13px;
+    font-size: var(--text-sm);
     font-weight: 600;
     color: var(--text-secondary);
     text-transform: uppercase;
@@ -219,10 +239,10 @@
     align-items: center;
     justify-content: space-between;
     padding: 6px 0;
-    font-size: 13px;
+    font-size: var(--text-sm);
   }
   .setting-row + .setting-row {
-    border-top: 1px solid rgba(48, 54, 61, 0.4);
+    border-top: 1px solid var(--border);
   }
   .setting-label {
     color: var(--text);
@@ -234,20 +254,20 @@
     color: var(--text-muted);
   }
   .agent-emoji {
-    font-size: 14px;
+    font-size: var(--text-base);
   }
   .setting-value {
     color: var(--text-secondary);
   }
   .setting-value.mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--text-sm);
   }
   .status-ok {
-    color: var(--green);
+    color: var(--status-success);
   }
   .status-err {
-    color: var(--red);
+    color: var(--status-error);
   }
   .toggle-group {
     display: flex;
@@ -261,13 +281,13 @@
     border: none;
     color: var(--text-secondary);
     padding: 4px 12px;
-    font-size: 12px;
-    border-radius: 4px;
-    transition: all 0.15s;
+    font-size: var(--text-sm);
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-quick);
   }
   .toggle-btn.active {
     background: var(--accent);
-    color: #fff;
+    color: var(--bg);
   }
   .toggle-btn:not(.active):hover {
     color: var(--text);
@@ -284,7 +304,7 @@
     width: 28px;
     height: 28px;
     border-radius: var(--radius-sm);
-    font-size: 16px;
+    font-size: var(--text-lg);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -294,7 +314,7 @@
   }
   .size-value {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: var(--text-secondary);
     min-width: 36px;
     text-align: center;
@@ -308,7 +328,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: var(--text-secondary);
   }
   .settings-input {
@@ -317,7 +337,7 @@
     border-radius: var(--radius-sm);
     color: var(--text);
     padding: 8px 10px;
-    font-size: 13px;
+    font-size: var(--text-sm);
     font-family: var(--font-mono);
     width: 100%;
   }
@@ -332,10 +352,10 @@
   .btn-primary {
     background: var(--accent);
     border: none;
-    color: #fff;
+    color: var(--bg);
     padding: 8px 16px;
     border-radius: var(--radius-sm);
-    font-size: 13px;
+    font-size: var(--text-sm);
     font-weight: 500;
   }
   .btn-primary:hover {
@@ -343,13 +363,18 @@
   }
   .btn-danger {
     background: none;
-    border: 1px solid var(--red);
-    color: var(--red);
+    border: 1px solid var(--status-error);
+    color: var(--status-error);
     padding: 8px 16px;
     border-radius: var(--radius-sm);
-    font-size: 13px;
+    font-size: var(--text-sm);
   }
   .btn-danger:hover {
     background: rgba(248, 81, 73, 0.1);
+  }
+  .cost-section :global(.cost-dashboard) {
+    padding: 0;
+    height: auto;
+    overflow: visible;
   }
 </style>

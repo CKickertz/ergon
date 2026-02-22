@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import { createLogger } from "../koina/logger.js";
 import { SessionError } from "../koina/errors.js";
 import { generateId, generateSessionKey } from "../koina/crypto.js";
+import { decryptIfNeeded, encryptIfEnabled } from "../koina/encryption.js";
 import { DDL, MIGRATIONS, SCHEMA_VERSION } from "./schema.js";
 
 const log = createLogger("mneme");
@@ -84,6 +85,39 @@ export interface UsageRecord {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   model: string | null;
+}
+
+export interface PlanStep {
+  id: number;
+  label: string;
+  role: "coder" | "reviewer" | "researcher" | "explorer" | "runner" | "self";
+  estimatedCostCents: number;
+  parallel?: number[];
+  status: "pending" | "approved" | "skipped" | "running" | "done" | "failed";
+  result?: string;
+}
+
+export interface ExecutionPlanStep {
+  id: string;
+  description: string;
+  status: "pending" | "in_progress" | "completed" | "failed" | "skipped";
+  acceptanceCriteria?: string;
+  dependsOn: string[];
+  result?: string;
+  failureReason?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface StoredPlan {
+  id: string;
+  sessionId: string;
+  nousId: string;
+  status: string;
+  steps: PlanStep[];
+  totalEstimatedCostCents: number;
+  createdAt: string;
+  resolvedAt: string | null;
 }
 
 export interface ReflectionLog {
@@ -200,7 +234,7 @@ export class SessionStore {
         )
         .get() as { version: number } | undefined;
       return row?.version ?? 0;
-    } catch {
+    } catch { /* migration column may already exist */
       return 0;
     }
   }
@@ -312,6 +346,7 @@ export class SessionStore {
   ): number {
     // Atomic: SELECT + INSERT + UPDATE in a single transaction
     const tokenEstimate = opts?.tokenEstimate ?? 0;
+    const storedContent = encryptIfEnabled(content);
     const appendTx = this.db.transaction(() => {
       const nextSeq = this.db
         .prepare(
@@ -328,7 +363,7 @@ export class SessionStore {
           sessionId,
           nextSeq.next,
           role,
-          content,
+          storedContent,
           opts?.toolCallId ?? null,
           opts?.toolName ?? null,
           tokenEstimate,
@@ -1164,6 +1199,39 @@ export class SessionStore {
     }));
   }
 
+  getDailyCosts(days: number): Array<{
+    date: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    turns: number;
+  }> {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+    const rows = this.db
+      .prepare(
+        `SELECT DATE(created_at) AS date,
+                SUM(input_tokens) AS input_tokens,
+                SUM(output_tokens) AS output_tokens,
+                SUM(cache_read_tokens) AS cache_read_tokens,
+                SUM(cache_write_tokens) AS cache_write_tokens,
+                COUNT(*) AS turns
+         FROM usage
+         WHERE DATE(created_at) >= ?
+         GROUP BY DATE(created_at)
+         ORDER BY date ASC`,
+      )
+      .all(cutoff) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      date: row['date'] as string,
+      inputTokens: row['input_tokens'] as number,
+      outputTokens: row['output_tokens'] as number,
+      cacheReadTokens: row['cache_read_tokens'] as number,
+      cacheWriteTokens: row['cache_write_tokens'] as number,
+      turns: row['turns'] as number,
+    }));
+  }
+
   // --- Retention / Data Lifecycle ---
 
   /**
@@ -1265,7 +1333,8 @@ export class SessionStore {
     if (!raw) return null;
     try {
       return JSON.parse(raw) as WorkingState;
-    } catch {
+    } catch (err) {
+      log.debug(`Corrupt working state JSON: ${err instanceof Error ? err.message : err}`);
       return null;
     }
   }
@@ -1274,7 +1343,8 @@ export class SessionStore {
     if (!raw) return null;
     try {
       return JSON.parse(raw) as T;
-    } catch {
+    } catch (err) {
+      log.debug(`Corrupt JSON field: ${err instanceof Error ? err.message : err}`);
       return null;
     }
   }
@@ -1285,7 +1355,7 @@ export class SessionStore {
       sessionId: row['session_id'] as string,
       seq: row['seq'] as number,
       role: row['role'] as Message["role"],
-      content: row['content'] as string,
+      content: decryptIfNeeded(row['content'] as string),
       toolCallId: row['tool_call_id'] as string | null,
       toolName: row['tool_name'] as string | null,
       tokenEstimate: row['token_estimate'] as number,
@@ -1857,6 +1927,99 @@ export class SessionStore {
       .run(sessionId);
   }
 
+  // --- Session Forking (Checkpoint Time-Travel) ---
+
+  getCheckpoints(sessionId: string): Array<{
+    distillationNumber: number;
+    distilledAt: string;
+    messagesBefore: number;
+    messagesAfter: number;
+    factsExtracted: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT distillation_number, distilled_at, messages_before, messages_after, facts_extracted
+         FROM distillation_log WHERE session_id = ? ORDER BY distillation_number ASC`,
+      )
+      .all(sessionId) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      distillationNumber: r["distillation_number"] as number,
+      distilledAt: r["distilled_at"] as string,
+      messagesBefore: r["messages_before"] as number,
+      messagesAfter: r["messages_after"] as number,
+      factsExtracted: r["facts_extracted"] as number,
+    }));
+  }
+
+  forkSession(
+    sessionId: string,
+    distillationNumber: number,
+  ): { newSessionId: string; messagesCopied: number } {
+    const receipt = this.db
+      .prepare(
+        "SELECT * FROM distillation_log WHERE session_id = ? AND distillation_number = ? LIMIT 1",
+      )
+      .get(sessionId, distillationNumber) as Record<string, unknown> | undefined;
+    if (!receipt) {
+      throw new SessionError("Distillation checkpoint not found", {
+        code: "SESSION_NOT_FOUND",
+        context: { sessionId, distillationNumber },
+      });
+    }
+
+    const original = this.findSessionById(sessionId);
+    if (!original) {
+      throw new SessionError("Source session not found", {
+        code: "SESSION_NOT_FOUND",
+        context: { sessionId },
+      });
+    }
+
+    // Find the distillation summary message for this checkpoint
+    const summaryRow = this.db
+      .prepare(
+        `SELECT seq FROM messages
+         WHERE session_id = ? AND role = 'assistant'
+           AND content LIKE ? AND is_distilled = 0
+         ORDER BY seq ASC LIMIT 1`,
+      )
+      .get(sessionId, `%[Distillation #${distillationNumber}]%`) as { seq: number } | undefined;
+
+    const cutoffSeq = summaryRow?.seq;
+    if (!cutoffSeq) {
+      throw new SessionError("Distillation summary message not found", {
+        code: "SESSION_CORRUPTED",
+        context: { sessionId, distillationNumber },
+      });
+    }
+
+    const forkKey = `fork:${sessionId.slice(4, 12)}:d${distillationNumber}:${Date.now().toString(36)}`;
+    const newSession = this.createSession(original.nousId, forkKey, sessionId);
+
+    // Copy non-distilled messages up to and including the checkpoint summary
+    const msgs = this.db
+      .prepare(
+        `SELECT role, content, tool_call_id, tool_name, token_estimate
+         FROM messages
+         WHERE session_id = ? AND is_distilled = 0 AND seq <= ?
+         ORDER BY seq ASC`,
+      )
+      .all(sessionId, cutoffSeq) as Array<Record<string, unknown>>;
+
+    for (const m of msgs) {
+      const opts: { toolCallId?: string; toolName?: string; tokenEstimate?: number } = {};
+      if (m["tool_call_id"]) opts.toolCallId = m["tool_call_id"] as string;
+      if (m["tool_name"]) opts.toolName = m["tool_name"] as string;
+      if (m["token_estimate"]) opts.tokenEstimate = m["token_estimate"] as number;
+      this.appendMessage(newSession.id, m["role"] as Message["role"], m["content"] as string, opts);
+    }
+
+    log.info(
+      `Forked session ${sessionId} at distillation #${distillationNumber} → ${newSession.id} (${msgs.length} messages)`,
+    );
+    return { newSessionId: newSession.id, messagesCopied: msgs.length };
+  }
+
   // --- Distillation Priming ---
 
   setDistillationPriming(sessionId: string, priming: DistillationPriming): void {
@@ -1975,6 +2138,62 @@ export class SessionStore {
       .prepare("SELECT COUNT(*) as count FROM message_queue WHERE session_id = ?")
       .get(sessionId) as { count: number } | undefined;
     return row?.count ?? 0;
+  }
+
+  // --- Plans ---
+
+  createPlan(plan: { id: string; sessionId: string; nousId: string; steps: PlanStep[]; totalEstimatedCostCents: number }): void {
+    this.db
+      .prepare("INSERT INTO plans (id, session_id, nous_id, steps, total_estimated_cost_cents) VALUES (?, ?, ?, ?, ?)")
+      .run(plan.id, plan.sessionId, plan.nousId, JSON.stringify(plan.steps), plan.totalEstimatedCostCents);
+  }
+
+  getPlan(planId: string): StoredPlan | null {
+    const row = this.db
+      .prepare("SELECT * FROM plans WHERE id = ?")
+      .get(planId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapPlan(row);
+  }
+
+  getActivePlan(sessionId: string): StoredPlan | null {
+    const row = this.db
+      .prepare("SELECT * FROM plans WHERE session_id = ? AND status IN ('awaiting_approval', 'executing') ORDER BY created_at DESC LIMIT 1")
+      .get(sessionId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapPlan(row);
+  }
+
+  updatePlanStatus(planId: string, status: string): void {
+    const resolvedAt = status === "completed" || status === "cancelled" ? new Date().toISOString() : null;
+    this.db
+      .prepare("UPDATE plans SET status = ?, resolved_at = COALESCE(?, resolved_at) WHERE id = ?")
+      .run(status, resolvedAt, planId);
+  }
+
+  updatePlanSteps(planId: string, steps: (PlanStep | ExecutionPlanStep)[]): void {
+    this.db
+      .prepare("UPDATE plans SET steps = ? WHERE id = ?")
+      .run(JSON.stringify(steps), planId);
+  }
+
+  createExecutionPlan(plan: { id: string; sessionId: string; nousId: string; goal: string; steps: ExecutionPlanStep[] }): void {
+    this.db
+      .prepare("INSERT INTO plans (id, session_id, nous_id, status, steps, total_estimated_cost_cents) VALUES (?, ?, ?, 'executing', ?, 0)")
+      .run(plan.id, plan.sessionId, plan.nousId, JSON.stringify(plan.steps));
+  }
+
+  private mapPlan(r: Record<string, unknown>): StoredPlan {
+    return {
+      id: r["id"] as string,
+      sessionId: r["session_id"] as string,
+      nousId: r["nous_id"] as string,
+      status: r["status"] as string,
+      steps: JSON.parse(r["steps"] as string) as PlanStep[],
+      totalEstimatedCostCents: r["total_estimated_cost_cents"] as number,
+      createdAt: r["created_at"] as string,
+      resolvedAt: r["resolved_at"] as string | null,
+    };
   }
 
   private mapThread(r: Record<string, unknown>): Thread {
@@ -2118,7 +2337,7 @@ export class SessionStore {
     };
     try {
       findings = JSON.parse(r["findings"] as string) as ReflectionFindings;
-    } catch {
+    } catch { /* DB cleanup failed — non-fatal */
       log.warn(`Malformed findings JSON in reflection ${r["id"]}`);
     }
     return {
