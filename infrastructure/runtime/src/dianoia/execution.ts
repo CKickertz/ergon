@@ -5,20 +5,48 @@ import type { ToolContext, ToolHandler } from "../organon/registry.js";
 import { PlanningStore } from "./store.js";
 import type { PlanningPhase, SpawnRecord } from "./types.js";
 import type { PhasePlan } from "./roadmap.js";
-import { buildContextPacket, selectModelForRole, modelTierToRole } from "./context-packet.js";
+import { buildContextPacketSync } from "./context-packet.js";
+import { parseDispatchResponse, selectRoleForTask } from "./structured-extraction.js";
 
 const log = createLogger("dianoia:execution");
-const ZOMBIE_THRESHOLD_SECONDS = 600; // 2x default 300s plan timeout
+const ZOMBIE_THRESHOLD_SECONDS = 600; // Conservative threshold; execution timeouts are per-task, zombies are per-record
 
 export function computeWaves(phases: PlanningPhase[]): PlanningPhase[][] {
   // Unit of parallelism is the PlanningPhase (plan).
   // Uses PhasePlan.dependencies (plan-to-plan), NOT PlanStep.dependsOn (step-to-step within a plan).
   const idSet = new Set(phases.map((p) => p.id));
   const deps = new Map<string, Set<string>>();
+
+  // First pass: prefer column-level dependencies (PlanningPhase.dependencies)
+  // over plan-blob dependencies (PhasePlan.dependencies). Column deps are set
+  // by the roadmap orchestrator from LLM output; plan deps are often wrong
+  // (LLM fills them with package names instead of phase IDs).
+  let hasExplicitDeps = false;
   for (const phase of phases) {
+    // Column-level dependencies (V27 migration) — preferred source
+    const columnDeps = (phase.dependencies ?? []).filter((d) => idSet.has(d));
+    
+    // Fallback to plan-blob dependencies for backward compatibility
     const plan = phase.plan as PhasePlan | null;
-    const planDeps = (plan?.dependencies ?? []).filter((d) => idSet.has(d));
+    const planDeps = columnDeps.length > 0
+      ? columnDeps
+      : (plan?.dependencies ?? []).filter((d) => idSet.has(d));
+    
     deps.set(phase.id, new Set(planDeps));
+    if (planDeps.length > 0) hasExplicitDeps = true;
+  }
+
+  // Fallback: if NO phase has valid inter-phase dependencies, infer sequential
+  // ordering from phaseOrder. This handles the common case where the LLM fills
+  // PhasePlan.dependencies with package names instead of phase IDs.
+  if (!hasExplicitDeps && phases.length > 1) {
+    const sorted = [...phases].sort((a, b) => a.phaseOrder - b.phaseOrder);
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1]!;
+      const curr = sorted[i]!;
+      deps.get(curr.id)!.add(prev.id);
+    }
+    log.info(`No explicit inter-phase dependencies found; inferred sequential order from phaseOrder (${sorted.map(p => p.phaseOrder).join(" → ")})`);
   }
 
   const waves: PlanningPhase[][] = [];
@@ -46,6 +74,12 @@ export function directDependents(failedPhaseId: string, allPhases: PlanningPhase
   // Direct-dependents-only per CONTEXT.md decision:
   // Plan A fails -> skip B (depends on A). Plan C (depends on B) still runs if no other blocker.
   return allPhases.filter((p) => {
+    // Prefer column-level dependencies over plan-blob
+    const columnDeps = p.dependencies ?? [];
+    if (columnDeps.length > 0) {
+      return columnDeps.includes(failedPhaseId);
+    }
+    // Fallback to plan-blob
     const plan = p.plan as PhasePlan | null;
     const phaseDeps = plan?.dependencies ?? [];
     return phaseDeps.includes(failedPhaseId);
@@ -116,10 +150,12 @@ export class ExecutionOrchestrator {
       }
 
       const wave = waves[waveIndex]!;
+      // Re-read records each wave (reapZombies may have mutated earlier records)
+      const currentRecords = this.store.listSpawnRecords(projectId);
       const activePlans = wave.filter(
         (p) =>
           !skippedIds.has(p.id) &&
-          !existingRecords.some((r) => r.phaseId === p.id && r.status === "done"),
+          !currentRecords.some((r) => r.phaseId === p.id && (r.status === "done" || r.status === "running")),
       );
 
       if (activePlans.length === 0) continue;
@@ -143,13 +179,11 @@ export class ExecutionOrchestrator {
         spawnIds.push(record.id);
       }
 
-      const modelTier = selectModelForRole("executor");
-      const role = modelTierToRole(modelTier);
-
+      // Map each plan to appropriate role based on its task content
       const tasks = activePlans.map((plan) => {
         // Build scoped context packet from file-backed state
         const contextPacket = this.workspaceRoot
-          ? buildContextPacket({
+          ? buildContextPacketSync({
               workspaceRoot: this.workspaceRoot,
               projectId,
               phaseId: plan.id,
@@ -163,34 +197,68 @@ export class ExecutionOrchestrator {
             })
           : buildExecutionPrompt(plan, project.goal); // Fallback if no workspace
 
+        // Select role based on task content rather than fixed "executor" role
+        const selectedRole = selectRoleForTask(plan.goal + " " + plan.successCriteria.join(" "));
+
         return {
-          role: role as "coder",
+          role: selectedRole,
           task: contextPacket,
-          timeoutSeconds: 300,
+          timeoutSeconds: 900, // 15 min — matches MAX_TURN_WALL_CLOCK_MS in execute.ts
         };
       });
 
-      let output: {
-        results: Array<{ status: string; result?: string; error?: string; durationMs: number }>;
-      };
+      let dispatchResult: Awaited<ReturnType<typeof parseDispatchResponse>>;
+      
       try {
         const raw = await this.dispatchTool.execute({ tasks }, toolContext);
-        output = JSON.parse(raw as string) as typeof output;
+        
+        // Try structured extraction with one retry using Zod error feedback
+        dispatchResult = await parseDispatchResponse(raw as string, async (errorMessage) => {
+          log.warn(`Dispatch response parsing failed: ${errorMessage}. Re-dispatching with error feedback...`);
+
+          // Build feedback-enriched tasks: same tasks but with error context appended
+          const feedbackTasks = tasks.map(t => ({
+            ...t,
+            task: t.task + `\n\n---\n\n**IMPORTANT: Your previous response failed validation.**\nError: ${errorMessage}\n\nPlease ensure your response ends with a valid JSON block matching the required output format.`,
+          }));
+
+          try {
+            const retryRaw = await this.dispatchTool.execute({ tasks: feedbackTasks }, toolContext);
+            return retryRaw as string;
+          } catch (retryErr) {
+            throw new Error(`Retry dispatch also failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`);
+          }
+        });
+        
+        if (!dispatchResult) {
+          throw new Error("Failed to parse dispatch response after retry");
+        }
       } catch (err) {
-        // Dispatch itself failed — mark all as failed
-        output = {
-          results: activePlans.map(() => ({
-            status: "error",
+        // Dispatch or parsing failed — mark all as failed
+        dispatchResult = {
+          taskCount: activePlans.length,
+          succeeded: 0,
+          failed: activePlans.length,
+          results: activePlans.map((_, index) => ({
+            index,
+            task: activePlans[index]?.goal ?? "unknown",
+            status: "error" as const,
             error: String(err),
             durationMs: 0,
           })),
+          timing: {
+            wallClockMs: 0,
+            sequentialMs: 0,
+            savedMs: 0,
+          },
+          totalTokens: 0,
         };
       }
 
       for (let i = 0; i < activePlans.length; i++) {
         const plan = activePlans[i]!;
         const spawnId = spawnIds[i]!;
-        const result = output.results[i];
+        const result = dispatchResult.results[i];
 
         if (result?.status === "success") {
           this.store.updateSpawnRecord(spawnId, {
@@ -352,5 +420,19 @@ function buildExecutionPrompt(phase: PlanningPhase, projectGoal: string): string
     phase.plan
       ? JSON.stringify(phase.plan, null, 2)
       : "(no plan — use phase goal and success criteria)",
+    ``,
+    `---`,
+    ``,
+    `## Output Format (REQUIRED)`,
+    `When done, end your response with:`,
+    "```json",
+    `{`,
+    `  "status": "success" | "partial" | "failed",`,
+    `  "summary": "Brief description of what was accomplished",`,
+    `  "filesChanged": ["list", "of", "files"],`,
+    `  "issues": [],`,
+    `  "confidence": 0.0-1.0`,
+    `}`,
+    "```",
   ].join("\n");
 }

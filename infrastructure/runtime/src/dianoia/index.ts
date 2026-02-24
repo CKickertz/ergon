@@ -12,7 +12,7 @@ export type {
   PlanningResearch,
   ProjectContext,
 } from "./types.js";
-export { PLANNING_V20_DDL, PLANNING_V21_MIGRATION, PLANNING_V22_MIGRATION, PLANNING_V23_MIGRATION, PLANNING_V24_MIGRATION, PLANNING_V25_MIGRATION, PLANNING_V26_MIGRATION } from "./schema.js";
+export { PLANNING_V20_DDL, PLANNING_V21_MIGRATION, PLANNING_V22_MIGRATION, PLANNING_V23_MIGRATION, PLANNING_V24_MIGRATION, PLANNING_V25_MIGRATION, PLANNING_V26_MIGRATION, PLANNING_V27_MIGRATION } from "./schema.js";
 export type { DiscussionQuestion, DiscussionOption } from "./types.js";
 export { ResearchOrchestrator } from "./researcher.js";
 export { createPlanResearchTool } from "./research-tool.js";
@@ -62,3 +62,8 @@ export { createPlanDiscussTool } from "./discuss-tool.js";
 // Context engineering (Spec 32 Phase 2)
 export { buildContextPacket, selectModelForRole, modelTierToRole } from "./context-packet.js";
 export type { SubAgentRole, ContextPacketOptions, ModelTier } from "./context-packet.js";
+
+// Orchestration Core (Improving Dianoia - ORCH requirements)
+export { OrchestrationCore } from "./orchestration-core.js";
+export type { RollbackPlan, RollbackAction, StateTransitionResult } from "./orchestration-core.js";
+export { createOrchestrationTool } from "./orchestration-tool.js";

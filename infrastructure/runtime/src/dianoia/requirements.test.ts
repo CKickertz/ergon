@@ -5,6 +5,10 @@ import {
   PLANNING_V21_MIGRATION,
   PLANNING_V22_MIGRATION,
   PLANNING_V23_MIGRATION,
+  PLANNING_V24_MIGRATION,
+  PLANNING_V25_MIGRATION,
+  PLANNING_V26_MIGRATION,
+  PLANNING_V27_MIGRATION,
 } from "./schema.js";
 import { PlanningStore } from "./store.js";
 import { RequirementsOrchestrator } from "./requirements.js";
@@ -17,6 +21,10 @@ function makeDb(): Database.Database {
   db.exec(PLANNING_V21_MIGRATION);
   db.exec(PLANNING_V22_MIGRATION);
   db.exec(PLANNING_V23_MIGRATION);
+  db.exec(PLANNING_V24_MIGRATION);
+  db.exec(PLANNING_V25_MIGRATION);
+  db.exec(PLANNING_V26_MIGRATION);
+  db.exec(PLANNING_V27_MIGRATION);
   return db;
 }
 
@@ -204,5 +212,122 @@ describe("RequirementsOrchestrator.validateCoverage()", () => {
     orch.persistCategory(projectId, AUTH_CATEGORY, decisions);
 
     expect(orch.validateCoverage(projectId, ["AUTH"])).toBe(true);
+  });
+
+  // CTX-03 enhancements
+  it("returns false when fewer than minimum categories presented (explicit minimum=2)", () => {
+    const db = makeDb();
+    const projectId = makeProject(db);
+    const orch = new RequirementsOrchestrator(db);
+
+    const decisions: ScopingDecision[] = [
+      { name: "Login with email/password", tier: "v1" },
+    ];
+    orch.persistCategory(projectId, AUTH_CATEGORY, decisions);
+
+    // Only 1 category, should fail when minimum is explicitly 2
+    expect(orch.validateCoverage(projectId, ["AUTH"], 2)).toBe(false);
+  });
+
+  it("passes with single category (default minimum=1)", () => {
+    const db = makeDb();
+    const projectId = makeProject(db);
+    const orch = new RequirementsOrchestrator(db);
+
+    const decisions: ScopingDecision[] = [
+      { name: "Login with email/password", tier: "v1" },
+    ];
+    orch.persistCategory(projectId, AUTH_CATEGORY, decisions);
+
+    // Default minimum is 1, single category should pass
+    expect(orch.validateCoverage(projectId, ["AUTH"])).toBe(true);
+  });
+});
+
+describe("RequirementsOrchestrator.persistCategory() - CTX-03 enhancements", () => {
+  it("throws on duplicate reqId from cross-category collision", () => {
+    const db = makeDb();
+    const projectId = makeProject(db);
+    const orch = new RequirementsOrchestrator(db);
+
+    // Manually insert a requirement with reqId AUTH-01 under a different category
+    // This simulates a cross-category collision where another category happened
+    // to produce the same reqId prefix
+    const store = new PlanningStore(db);
+    store.createRequirement({
+      projectId,
+      reqId: "AUTH-01",
+      description: "Existing AUTH-01 from another source",
+      category: "OTHER",
+      tier: "v1",
+      rationale: null,
+    });
+
+    // Now persist AUTH category — nextNum will be 1 (no existing AUTH reqs),
+    // generating AUTH-01 which conflicts with the cross-category entry
+    const decisions: ScopingDecision[] = [
+      { name: "Login with email/password", tier: "v1" },
+    ];
+
+    expect(() => {
+      orch.persistCategory(projectId, AUTH_CATEGORY, decisions);
+    }).toThrow("Duplicate requirement ID: AUTH-01");
+  });
+
+  it("throws when table-stakes feature is out-of-scope without rationale", () => {
+    const db = makeDb();
+    const projectId = makeProject(db);
+    const orch = new RequirementsOrchestrator(db);
+
+    const decisions: ScopingDecision[] = [
+      { 
+        name: "Login with email/password", 
+        tier: "out-of-scope",
+        // No rationale provided for table-stakes feature
+      },
+    ];
+
+    expect(() => {
+      orch.persistCategory(projectId, AUTH_CATEGORY, decisions);
+    }).toThrow('Table-stakes feature "Login with email/password" marked as out-of-scope without rationale');
+  });
+
+  it("allows table-stakes feature out-of-scope with rationale", () => {
+    const db = makeDb();
+    const projectId = makeProject(db);
+    const orch = new RequirementsOrchestrator(db);
+
+    const decisions: ScopingDecision[] = [
+      { 
+        name: "Login with email/password", 
+        tier: "out-of-scope",
+        rationale: "Using third-party auth only"
+      },
+    ];
+
+    // Should not throw
+    expect(() => {
+      orch.persistCategory(projectId, AUTH_CATEGORY, decisions);
+    }).not.toThrow();
+
+    const store = new PlanningStore(db);
+    const reqs = store.listRequirements(projectId);
+    expect(reqs[0]!.rationale).toBe("Using third-party auth only");
+  });
+
+  it("allows non-table-stakes features out-of-scope without rationale", () => {
+    const db = makeDb();
+    const projectId = makeProject(db);
+    const orch = new RequirementsOrchestrator(db);
+
+    const decisions: ScopingDecision[] = [
+      { name: "Login with email/password", tier: "v1" }, // table-stakes
+      { name: "SSO", tier: "out-of-scope" }, // differentiator, no rationale required
+    ];
+
+    // Should not throw
+    expect(() => {
+      orch.persistCategory(projectId, AUTH_CATEGORY, decisions);
+    }).not.toThrow();
   });
 });
