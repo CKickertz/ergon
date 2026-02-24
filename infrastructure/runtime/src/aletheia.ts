@@ -52,7 +52,7 @@ import { createWorkspaceIndexTool } from "./organon/built-in/workspace-index.js"
 import { loadCustomCommands, registerCustomCommands } from "./organon/custom-commands.js";
 import { NousManager } from "./nous/manager.js";
 import { DianoiaOrchestrator } from "./dianoia/orchestrator.js";
-import { CheckpointSystem, createPlanCreateTool, createPlanExecuteTool, createPlanRequirementsTool, createPlanResearchTool, createPlanRoadmapTool, createPlanVerifyTool, ExecutionOrchestrator, GoalBackwardVerifier, PlanningStore, RequirementsOrchestrator, ResearchOrchestrator, RoadmapOrchestrator } from "./dianoia/index.js";
+import { CheckpointSystem, createPlanCreateTool, createPlanDiscussTool, createPlanExecuteTool, createPlanRequirementsTool, createPlanResearchTool, createPlanRoadmapTool, createPlanVerifyTool, ExecutionOrchestrator, GoalBackwardVerifier, PlanningStore, RequirementsOrchestrator, ResearchOrchestrator, RoadmapOrchestrator } from "./dianoia/index.js";
 import { McpClientManager } from "./organon/mcp-client.js";
 import { createGateway, type GatewayAuthDeps, setCommandsRef, setCronRef, setMcpRef, setSkillsRef, setWatchdogRef, startGateway } from "./pylon/server.js";
 import { AuthSessionStore } from "./auth/sessions.js";
@@ -271,8 +271,9 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
   };
   const planningStore = new PlanningStore(store.getDb());
   const planningOrchestrator = new DianoiaOrchestrator(store.getDb(), planningConfig);
+  planningOrchestrator.setWorkspaceRoot(defaultWorkspace);
   manager.setPlanningOrchestrator(planningOrchestrator);
-  log.info("Dianoia planning orchestrator initialized");
+  log.info("Dianoia planning orchestrator initialized", { workspace: defaultWorkspace });
 
   const plugins = new PluginRegistry(config);
 
@@ -384,17 +385,24 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
 
   // Planning roadmap orchestrator — wired after dispatchTool is available
   const roadmapOrchestrator = new RoadmapOrchestrator(store.getDb(), dispatchTool);
+  roadmapOrchestrator.setWorkspaceRoot(defaultWorkspace);
   const planRoadmapTool = createPlanRoadmapTool(planningOrchestrator, roadmapOrchestrator);
   tools.register(planRoadmapTool);
 
+  // Planning discussion tool — bridges 'discussing' state between roadmap and phase-planning
+  const planDiscussTool = createPlanDiscussTool(planningOrchestrator, store.getDb());
+  tools.register(planDiscussTool);
+
   // Planning execution orchestrator — wired after dispatchTool is available
   const executionOrchestrator = new ExecutionOrchestrator(store.getDb(), dispatchTool);
+  executionOrchestrator.setWorkspaceRoot(defaultWorkspace);
   const planExecuteTool = createPlanExecuteTool(planningOrchestrator, executionOrchestrator);
   tools.register(planExecuteTool);
   manager.setExecutionOrchestrator(executionOrchestrator);
 
   // Planning verifier and checkpoint system — wired after executionOrchestrator
   const verifierOrchestrator = new GoalBackwardVerifier(store.getDb(), dispatchTool);
+  verifierOrchestrator.setWorkspaceRoot(defaultWorkspace);
   const checkpointSystem = new CheckpointSystem(planningStore, planningConfig);
   const planVerifyTool = createPlanVerifyTool(
     planningOrchestrator,
