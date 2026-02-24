@@ -18,6 +18,9 @@ import { AsyncChannel } from "./async-channel.js";
 import { resolveNousId } from "./pipeline/stages/resolve.js";
 import { runBufferedPipeline, runStreamingPipeline } from "./pipeline/runner.js";
 import type { InboundMessage, RuntimeServices, TurnOutcome, TurnStreamEvent } from "./pipeline/types.js";
+import type { SkillRegistry } from "../organon/skills.js";
+import type { DianoiaOrchestrator } from "../dianoia/orchestrator.js";
+import type { ExecutionOrchestrator } from "../dianoia/execution.js";
 
 export type { InboundMessage, TurnOutcome, TurnStreamEvent, MediaAttachment } from "./pipeline/types.js";
 
@@ -49,6 +52,9 @@ export class NousManager {
   private watchdog?: Watchdog;
   private memoryTarget?: MemoryFlushTarget;
   private skillsSection?: string | undefined;
+  private skills?: SkillRegistry;
+  private planningOrchestrator?: DianoiaOrchestrator;
+  private executionOrchestrator?: ExecutionOrchestrator;
   competence?: CompetenceModel;
   uncertainty?: UncertaintyTracker;
   activeTurns = 0;
@@ -74,8 +80,13 @@ export class NousManager {
   setWatchdog(watchdog: Watchdog): void { this.watchdog = watchdog; }
   setMemoryTarget(target: MemoryFlushTarget): void { this.memoryTarget = target; }
   setSkillsSection(section: string | undefined): void { this.skillsSection = section; }
+  setSkills(registry: SkillRegistry): void { this.skills = registry; }
   setCompetence(model: CompetenceModel): void { this.competence = model; }
   setUncertainty(tracker: UncertaintyTracker): void { this.uncertainty = tracker; }
+  setPlanningOrchestrator(orchestrator: DianoiaOrchestrator): void { this.planningOrchestrator = orchestrator; }
+  getPlanningOrchestrator(): DianoiaOrchestrator | undefined { return this.planningOrchestrator; }
+  setExecutionOrchestrator(orchestrator: ExecutionOrchestrator): void { this.executionOrchestrator = orchestrator; }
+  getExecutionOrchestrator(): ExecutionOrchestrator | undefined { return this.executionOrchestrator; }
 
   reloadConfig(newConfig: AletheiaConfig): { added: string[]; removed: string[] } {
     const oldIds = new Set(this.config.agents.list.map((n) => n.id));
@@ -130,9 +141,12 @@ export class NousManager {
       ...(this.competence ? { competence: this.competence } : {}),
       ...(this.uncertainty ? { uncertainty: this.uncertainty } : {}),
       ...(this.skillsSection !== undefined ? { skillsSection: this.skillsSection } : {}),
+      ...(this.skills ? { skills: this.skills } : {}),
       approvalGate: this.approvalGate,
       approvalMode,
       ...(this.memoryTarget ? { memoryTarget: this.memoryTarget } : {}),
+      ...(this.planningOrchestrator ? { planningOrchestrator: this.planningOrchestrator } : {}),
+      ...(this.executionOrchestrator ? { executionOrchestrator: this.executionOrchestrator } : {}),
     };
   }
 
