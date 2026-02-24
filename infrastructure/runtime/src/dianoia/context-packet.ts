@@ -17,11 +17,23 @@ import {
   readPlanFile,
 } from "./project-files.js";
 import type { PlanningPhase, PlanningRequirement } from "./types.js";
+import { getEncoding } from "js-tiktoken";
+import { buildContextPacketWithPriompt, buildContextPacketWithPriomptSync } from "./priompt-context.js";
 
 const log = createLogger("dianoia:context-packet");
 
-// Rough token estimation: ~4 chars per token for English text
-const CHARS_PER_TOKEN = 4;
+// Use tiktoken for accurate token counting (Claude uses cl100k_base)
+const encoder = getEncoding("cl100k_base");
+
+function countTokens(text: string): number {
+  try {
+    return encoder.encode(text).length;
+  } catch (err) {
+    log.warn(`Failed to encode text for token counting: ${err instanceof Error ? err.message : String(err)}`);
+    // Fallback to character estimation
+    return Math.ceil(text.length / 4);
+  }
+}
 
 export type SubAgentRole =
   | "researcher"   // Domain research phase
@@ -130,10 +142,39 @@ const ROLE_SECTIONS: Record<SubAgentRole, {
  *
  * Reads from file-backed state (Phase 1), filters by role, trims to token budget.
  * The resulting string is self-contained — the sub-agent needs nothing else.
+ * 
+ * Now uses Priompt for accurate tokenization and priority-based rendering.
  */
-export function buildContextPacket(opts: ContextPacketOptions): string {
+export async function buildContextPacket(opts: ContextPacketOptions): Promise<string> {
+  try {
+    // Use Priompt-based implementation for accurate tokenization
+    return await buildContextPacketWithPriompt(opts);
+  } catch (err) {
+    log.warn(`Priompt context assembly failed, falling back to legacy: ${err instanceof Error ? err.message : String(err)}`);
+    // Fallback to legacy implementation if Priompt fails
+    return buildContextPacketLegacy(opts);
+  }
+}
+
+/**
+ * Synchronous context packet builder using accurate tiktoken tokenization.
+ * This is the primary call path — used by execution, verification, and roadmap.
+ */
+export function buildContextPacketSync(opts: ContextPacketOptions): string {
+  try {
+    return buildContextPacketWithPriomptSync(opts);
+  } catch (err) {
+    log.warn(`Priompt sync context assembly failed, falling back to legacy: ${err instanceof Error ? err.message : String(err)}`);
+    return buildContextPacketLegacy(opts);
+  }
+}
+
+/**
+ * Legacy context packet builder (fallback implementation).
+ * Preserved for compatibility if Priompt fails.
+ */
+function buildContextPacketLegacy(opts: ContextPacketOptions): string {
   const maxTokens = opts.maxTokens ?? 8000;
-  const maxChars = maxTokens * CHARS_PER_TOKEN;
   const config = ROLE_SECTIONS[opts.role];
   const sections: ContextSection[] = [];
 
@@ -148,6 +189,26 @@ export function buildContextPacket(opts: ContextPacketOptions): string {
       for (const c of opts.phase.successCriteria) {
         lines.push(`- ${c}`);
       }
+    }
+    // Add output format requirement for executors
+    if (opts.role === "executor") {
+      lines.push("", "---", "",
+        "**IMPORTANT — Output Format Requirement:**",
+        "When you have completed your work (or cannot proceed), you MUST end your final response with a JSON result block:",
+        "",
+        "```json",
+        "{",
+        '  "status": "success" | "partial" | "failed",',
+        '  "summary": "Brief description of what was accomplished",',
+        '  "filesChanged": ["list", "of", "files"],',
+        '  "issues": [],',
+        '  "confidence": 0.0-1.0',
+        "}",
+        "```",
+        "",
+        "This structured output is required for the orchestrator to process your results.",
+        "Do NOT omit this block. Do NOT return only prose.",
+      );
     }
     sections.push({ header: "Phase Objective", content: lines.join("\n"), priority: 0 });
   }
@@ -231,45 +292,52 @@ export function buildContextPacket(opts: ContextPacketOptions): string {
   }
 
   // Assemble sections in priority order, respecting token budget
-  return assembleSections(sections, maxChars);
+  return assembleSections(sections, maxTokens);
 }
 
 /**
  * Assemble sections in priority order, truncating to fit budget.
  * Final section may be truncated mid-content if budget is tight.
  */
-function assembleSections(sections: ContextSection[], maxChars: number): string {
+function assembleSections(sections: ContextSection[], maxTokens: number): string {
   // Sort by priority (lower = first)
   const sorted = [...sections].sort((a, b) => a.priority - b.priority);
 
   const parts: string[] = [];
-  let currentChars = 0;
+  let currentTokens = 0;
 
   for (const section of sorted) {
     const sectionText = `## ${section.header}\n\n${section.content}\n\n`;
-    const sectionChars = sectionText.length;
+    const sectionTokens = countTokens(sectionText);
 
-    if (currentChars + sectionChars <= maxChars) {
+    if (currentTokens + sectionTokens <= maxTokens) {
       // Fits entirely
       parts.push(sectionText);
-      currentChars += sectionChars;
+      currentTokens += sectionTokens;
     } else {
-      // Partial fit — truncate and add ellipsis
-      const remaining = maxChars - currentChars;
-      if (remaining > 100) {
+      // Partial fit — truncate by tokens and add ellipsis
+      const remainingTokens = maxTokens - currentTokens;
+      if (remainingTokens > 50) {
         // Only include if we can fit a meaningful chunk
-        const truncated = sectionText.slice(0, remaining - 20) + "\n\n[...truncated]";
-        parts.push(truncated);
-        currentChars = maxChars;
+        // Estimate chars that would fit in remaining tokens (rough approximation)
+        const estimatedCharsToFit = remainingTokens * 4;
+        const truncated = sectionText.slice(0, estimatedCharsToFit - 50) + "\n\n[...truncated]";
+        const finalTokens = countTokens(truncated);
+        if (currentTokens + finalTokens <= maxTokens) {
+          parts.push(truncated);
+          currentTokens += finalTokens;
+        }
       }
       break;
     }
   }
 
   const result = parts.join("").trim();
-  const estimatedTokens = Math.ceil(result.length / CHARS_PER_TOKEN);
-  log.debug(`Context packet assembled: ${sorted.length} sections, ~${estimatedTokens} tokens`, {
+  const actualTokens = countTokens(result);
+  log.debug(`Context packet assembled: ${sorted.length} sections, ${actualTokens} tokens`, {
     includedSections: sorted.map((s) => s.header),
+    tokenBudget: maxTokens,
+    utilization: `${Math.round((actualTokens / maxTokens) * 100)}%`,
   });
 
   return result;
@@ -340,6 +408,110 @@ function formatRoadmapSummary(phases: PlanningPhase[]): string {
     }
   }
   return lines.join("\n");
+}
+
+/**
+ * Task type classification for smart role/model selection.
+ */
+export type TaskType = 
+  | "code-generation"     // Writing new code, implementing features
+  | "code-editing"        // Modifying existing code, bug fixes
+  | "code-review"         // Analyzing code for issues, style, logic
+  | "exploration"         // Read-only codebase investigation
+  | "testing"             // Running tests, validation, health checks
+  | "research"            // Web research, documentation lookup
+  | "planning"            // Task decomposition, strategy
+  | "verification";       // Checking completeness, goal alignment
+
+export interface TaskClassification {
+  type: TaskType;
+  complexity: "low" | "medium" | "high";
+  requiresTooling: boolean;
+  readOnly: boolean;
+}
+
+/**
+ * Classify a task description to determine appropriate role and model.
+ * Uses heuristics based on keywords and patterns in the task text.
+ */
+export function classifyTask(task: string): TaskClassification {
+  const taskLower = task.toLowerCase();
+  
+  // Code generation indicators
+  if (taskLower.match(/\b(implement|create|build|write|add|generate)\b.*\b(function|class|component|module|feature|endpoint|api)\b/)) {
+    return { type: "code-generation", complexity: "medium", requiresTooling: true, readOnly: false };
+  }
+  
+  // Code editing indicators  
+  if (taskLower.match(/\b(fix|update|modify|change|edit|refactor|migrate)\b.*\b(bug|code|file|function|class)\b/)) {
+    return { type: "code-editing", complexity: "medium", requiresTooling: true, readOnly: false };
+  }
+  
+  // Code review indicators
+  if (taskLower.match(/\b(review|check|analyze|audit|inspect|validate)\b.*\b(code|pr|diff|changes|file)\b/)) {
+    return { type: "code-review", complexity: "low", requiresTooling: false, readOnly: true };
+  }
+  
+  // Exploration indicators
+  if (taskLower.match(/\b(find|locate|search|explore|investigate|trace|grep)\b/)) {
+    return { type: "exploration", complexity: "low", requiresTooling: false, readOnly: true };
+  }
+  
+  // Testing indicators
+  if (taskLower.match(/\b(test|run|execute|check|validate)\b.*\b(tests?|build|command|script)\b/)) {
+    return { type: "testing", complexity: "low", requiresTooling: true, readOnly: true };
+  }
+  
+  // Research indicators
+  if (taskLower.match(/\b(research|lookup|fetch|search|find)\b.*\b(documentation|api|library|package)\b/)) {
+    return { type: "research", complexity: "medium", requiresTooling: true, readOnly: true };
+  }
+  
+  // Planning indicators
+  if (taskLower.match(/\b(plan|design|architect|decompose|break down|organize)\b/)) {
+    return { type: "planning", complexity: "high", requiresTooling: false, readOnly: false };
+  }
+  
+  // Verification indicators
+  if (taskLower.match(/\b(verify|confirm|ensure|validate)\b.*\b(complete|goal|requirement|criteria)\b/)) {
+    return { type: "verification", complexity: "medium", requiresTooling: false, readOnly: true };
+  }
+  
+  // Default to code generation for ambiguous tasks
+  return { type: "code-generation", complexity: "medium", requiresTooling: true, readOnly: false };
+}
+
+/**
+ * Map a task classification to the optimal sub-agent role.
+ */
+export function taskTypeToRole(classification: TaskClassification): "coder" | "reviewer" | "researcher" | "explorer" | "runner" {
+  switch (classification.type) {
+    case "code-generation":
+    case "code-editing":
+      return "coder";
+    case "code-review":
+      return "reviewer";
+    case "research":
+      return "researcher";
+    case "exploration":
+      return "explorer";
+    case "testing":
+      return "runner";
+    case "planning":
+    case "verification":
+      return classification.complexity === "high" ? "coder" : "reviewer";  // Complex planning needs coder capability
+    default:
+      return "coder";
+  }
+}
+
+/**
+ * Select the appropriate role and model for a task.
+ * Replaces the old role-first approach with task-first classification.
+ */
+export function selectRoleForTask(task: string): "coder" | "reviewer" | "researcher" | "explorer" | "runner" {
+  const classification = classifyTask(task);
+  return taskTypeToRole(classification);
 }
 
 /**

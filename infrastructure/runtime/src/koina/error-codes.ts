@@ -26,6 +26,8 @@ export const ERROR_CODES = {
   PIPELINE_STAGE_FAILED: "A pipeline stage failed during execution",
   PIPELINE_NO_OUTCOME: "Pipeline completed without producing an outcome",
   PIPELINE_TOOL_LOOP: "Tool call loop detected",
+  PIPELINE_MAX_LOOPS: "Turn exceeded maximum tool loop count",
+  PIPELINE_WALL_CLOCK: "Turn exceeded wall-clock time limit",
   PIPELINE_STREAM_INCOMPLETE: "Streaming pipeline ended without message_complete",
   TOOL_EXECUTION_FAILED: "Tool call returned an error",
   TOOL_NOT_FOUND: "Agent requested a tool that is not registered",
@@ -94,6 +96,8 @@ export const ERROR_CODES = {
   PLANNING_INVALID_TRANSITION: "FSM transition is not valid from the current state",
   PLANNING_SPAWN_NOT_FOUND: "Spawn record ID does not exist",
   PLANNING_DISCUSSION_NOT_FOUND: "Discussion question ID does not exist",
+  PLANNING_DUPLICATE_REQUIREMENT_ID: "Requirement ID already exists for this project",
+  PLANNING_TABLE_STAKES_OUT_OF_SCOPE: "Table-stakes feature cannot be out-of-scope without rationale",
 } as const;
 
 export type ErrorCode = keyof typeof ERROR_CODES;

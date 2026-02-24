@@ -4,11 +4,12 @@ import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  buildContextPacket,
+  buildContextPacketSync,
   selectModelForRole,
   modelTierToRole,
   type SubAgentRole,
 } from "./context-packet.js";
+import { getEncoding } from "js-tiktoken";
 import {
   ensureProjectDir,
   ensurePhaseDir,
@@ -74,10 +75,10 @@ afterEach(() => {
   }
 });
 
-describe("buildContextPacket", () => {
+describe("buildContextPacketSync", () => {
   it("includes phase objective for executor role", () => {
     const phase = makePhase();
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: TEST_PHASE_ID,
@@ -94,7 +95,7 @@ describe("buildContextPacket", () => {
 
   it("includes project goal for verifier role", () => {
     const phase = makePhase();
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: TEST_PHASE_ID,
@@ -125,7 +126,7 @@ describe("buildContextPacket", () => {
     });
 
     const phase = makePhase();
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: TEST_PHASE_ID,
@@ -160,7 +161,7 @@ describe("buildContextPacket", () => {
     ]);
 
     const phase = makePhase();
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: TEST_PHASE_ID,
@@ -179,7 +180,7 @@ describe("buildContextPacket", () => {
       makeRequirement({ reqId: "AUTH-02", description: "GitHub OAuth login", id: "req_2" }),
     ];
 
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: TEST_PHASE_ID,
@@ -201,7 +202,7 @@ describe("buildContextPacket", () => {
       makePhase({ id: "p3", name: "UI", phaseOrder: 2, goal: "Build frontend" }),
     ];
 
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: "p1",
@@ -223,7 +224,7 @@ describe("buildContextPacket", () => {
       makePhase({ id: "p2", name: "API", phaseOrder: 1 }),
     ];
 
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: "p1",
@@ -239,7 +240,7 @@ describe("buildContextPacket", () => {
     const longSupplementary = "x".repeat(5000);
     const phase = makePhase();
 
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: TEST_PHASE_ID,
@@ -256,7 +257,7 @@ describe("buildContextPacket", () => {
 
   it("includes supplementary context for executor role", () => {
     const phase = makePhase();
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: TEST_PHASE_ID,
@@ -270,7 +271,7 @@ describe("buildContextPacket", () => {
   });
 
   it("returns empty string when no sections match", () => {
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: null,
@@ -288,7 +289,7 @@ describe("buildContextPacket", () => {
     });
 
     const phase = makePhase({ plan: null }); // No in-memory plan
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: TEST_PHASE_ID,
@@ -310,7 +311,7 @@ describe("buildContextPacket", () => {
     );
 
     const phase = makePhase();
-    const packet = buildContextPacket({
+    const packet = buildContextPacketSync({
       workspaceRoot,
       projectId: TEST_PROJECT_ID,
       phaseId: TEST_PHASE_ID,
@@ -340,5 +341,69 @@ describe("modelTierToRole", () => {
 
   it("maps sonnet to coder", () => {
     expect(modelTierToRole("sonnet")).toBe("coder");
+  });
+});
+
+describe("Token budget accuracy (CTX-01)", () => {
+  it("respects maxTokens budget within 5% margin", () => {
+    const phase = makePhase();
+    const requirements = [makeRequirement(), makeRequirement({ reqId: "AUTH-02", description: "Session management" })];
+    
+    // Create some substantial content to test truncation
+    const largeContent = "This is a large piece of content. ".repeat(1000);
+    
+    writeProjectFile(workspaceRoot, {
+      id: TEST_PROJECT_ID,
+      goal: largeContent,
+      state: "idle",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      projectContext: null,
+    });
+    
+    writeRequirementsFile(workspaceRoot, TEST_PROJECT_ID, requirements);
+    
+    const maxTokens = 500;
+    const packet = buildContextPacketSync({
+      workspaceRoot,
+      projectId: TEST_PROJECT_ID,
+      phaseId: TEST_PHASE_ID,
+      role: "executor",
+      phase,
+      projectGoal: "Build authentication",
+      maxTokens,
+    });
+
+    // Count actual tokens using tiktoken
+    const encoder = getEncoding("cl100k_base");
+    const actualTokens = encoder.encode(packet).length;
+    
+    // Should be within 5% of budget (not exceed it significantly)
+    expect(actualTokens).toBeLessThanOrEqual(maxTokens * 1.05);
+    
+    // Should use a reasonable portion of the budget (not be too conservative) - but only if there's enough content
+    expect(actualTokens).toBeGreaterThan(Math.min(maxTokens * 0.3, 100)); // At least 30% or 100 tokens, whichever is smaller
+  });
+
+  it("includes correct sections for executor role", () => {
+    const phase = makePhase();
+    const requirements = [makeRequirement()];
+    
+    const packet = buildContextPacketSync({
+      workspaceRoot,
+      projectId: TEST_PROJECT_ID,
+      phaseId: TEST_PHASE_ID,
+      role: "executor",
+      phase,
+      requirements,
+      maxTokens: 2000,
+    });
+
+    // Executor should get: phase goal, plan, discussion, requirements, supplementary
+    // but NOT: project context, roadmap, research
+    expect(packet).toContain("Phase Objective");
+    expect(packet).toContain("Requirements");
+    expect(packet).not.toContain("Research Findings");
+    expect(packet).not.toContain("Roadmap Overview");
   });
 });
