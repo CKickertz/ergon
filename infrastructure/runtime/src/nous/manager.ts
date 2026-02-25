@@ -10,8 +10,8 @@ import type { PluginRegistry } from "../prostheke/registry.js";
 import type { Watchdog } from "../daemon/watchdog.js";
 import type { CompetenceModel } from "./competence.js";
 import type { UncertaintyTracker } from "./uncertainty.js";
-import { distillSession } from "../distillation/pipeline.js";
-import type { MemoryFlushTarget } from "../distillation/hooks.js";
+import { distillSession } from "../melete/pipeline.js";
+import type { MemoryFlushTarget } from "../melete/hooks.js";
 import { ApprovalGate } from "../organon/approval.js";
 import type { ApprovalMode } from "../organon/approval.js";
 import { AsyncChannel } from "./async-channel.js";
@@ -39,6 +39,7 @@ function withSessionLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   );
   const settled = current.catch(() => {});
   sessionLocks.set(key, settled);
+  // eslint-disable-next-line promise/catch-or-return -- fire-and-forget cleanup; lock chain already catches above
   settled.then(() => {
     if (sessionLocks.get(key) === settled) sessionLocks.delete(key);
   });

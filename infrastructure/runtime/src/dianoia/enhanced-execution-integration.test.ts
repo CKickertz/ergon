@@ -5,11 +5,11 @@ import {
   EnhancedExecutionOrchestrator,
   DEFAULT_EXECUTION_OPTIONS
 } from "./enhanced-execution.js";
-import { 
+import {
   mapTaskToRole,
+  schemas,
   StructuredExtractor,
 } from "./structured-extraction.js";
-import { schemas } from "./structured-extraction.js";
 import { PLANNING_V20_DDL, PLANNING_V21_MIGRATION, PLANNING_V22_MIGRATION, PLANNING_V23_MIGRATION, PLANNING_V24_MIGRATION, PLANNING_V25_MIGRATION, PLANNING_V26_MIGRATION, PLANNING_V27_MIGRATION } from "./schema.js";
 import { PlanningStore } from "./store.js";
 import type { ToolHandler, ToolContext } from "../organon/registry.js";
@@ -277,7 +277,7 @@ Implementation completed.
     "security": "PKCE + refresh token rotation",
     "testing": "95% coverage"
   },
-  "filesChanged": ["src/auth/oauth.ts", "src/auth/jwt.ts", "tests/auth.test.ts"],
+  "filesChanged": ["src/symbolon/oauth.ts", "src/symbolon/jwt.ts", "tests/auth.test.ts"],
   "confidence": 0.95
 }
 \`\`\`
