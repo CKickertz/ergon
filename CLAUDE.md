@@ -6,6 +6,11 @@ Project conventions for AI coding agents working on this codebase.
 
 Follow [CONTRIBUTING.md](./CONTRIBUTING.md). Key points: self-documenting code, typed errors (`AletheiaError`), never empty catch, test behavior not implementation.
 
+@.claude/rules/typescript.md
+@.claude/rules/svelte.md
+@.claude/rules/python.md
+@.claude/rules/architecture.md
+
 ## Structure
 
 - **Runtime:** `infrastructure/runtime/src/` — TypeScript, tsdown, vitest
@@ -29,7 +34,7 @@ aletheia doctor                       # Validate config
 
 ## Patterns
 
-- **Modules:** Greek names — koina, taxis, mneme, hermeneus, nous, organon, semeion, pylon, prostheke
+- **Modules:** Greek names — koina, taxis, mneme, hermeneus, nous, organon, melete, symbolon, dianoia, semeion, pylon, prostheke, portability
 - **Errors:** `AletheiaError` hierarchy in `koina/errors.ts`, codes in `koina/error-codes.ts`, `trySafe`/`trySafeAsync` in `koina/safe.ts`
 - **Logging:** `createLogger("module-name")` — structured with AsyncLocalStorage context
 - **Events:** `eventBus` — `noun:verb` naming (e.g., `turn:before`, `tool:called`)
