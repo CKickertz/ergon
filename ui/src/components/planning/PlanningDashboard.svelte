@@ -8,16 +8,21 @@
   import CheckpointApproval from "./CheckpointApproval.svelte";
   import RetrospectiveView from "./RetrospectiveView.svelte";
   import TimelineView from "./TimelineView.svelte";
+  import TaskList from "./TaskList.svelte";
   import ErrorBanner from "../shared/ErrorBanner.svelte";
   import Spinner from "../shared/Spinner.svelte";
   import { getActiveAgentId } from "../../stores/agents.svelte";
   import { onGlobalEvent } from "../../lib/events.svelte";
   import { authFetch } from "./api";
 
+  type PlanningLayout = "panel" | "half" | "full";
+
   // Props from parent component (ChatView)
-  let { projectId: explicitProjectId, onClose }: {
+  let { projectId: explicitProjectId, onClose, layout = "panel", onLayoutChange }: {
     projectId?: string;
     onClose?: () => void;
+    layout?: PlanningLayout;
+    onLayoutChange?: () => void;
   } = $props();
 
   interface Project {
@@ -248,6 +253,8 @@
         stateLabel={stateLabel(project.state)}
         stateColor={stateColor(project.state)}
         onRefresh={loadProject}
+        {layout}
+        {...(onLayoutChange !== undefined && { onLayoutChange })}
         {...(onClose !== undefined && { onClose })}
       />
 
@@ -256,14 +263,14 @@
         <!-- Requirements Section -->
         {#if requirements.length > 0}
           <div class="dashboard-section">
-            <RequirementsTable {requirements} />
+            <RequirementsTable {requirements} projectId={project.id} />
           </div>
         {/if}
 
         <!-- Roadmap Section -->
         {#if phases.length > 0}
           <div class="dashboard-section">
-            <RoadmapView {phases} currentState={project.state} />
+            <RoadmapView {phases} currentState={project.state} projectId={project.id} />
           </div>
         {/if}
 
@@ -273,6 +280,11 @@
             <TimelineView projectId={project.id} />
           </div>
         {/if}
+
+        <!-- Task List -->
+        <div class="dashboard-section full-width">
+          <TaskList projectId={project.id} />
+        </div>
 
         <!-- Execution Status -->
         {#if executionPlans.length > 0}
