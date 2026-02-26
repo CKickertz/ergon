@@ -27,9 +27,9 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Graph Layer
 
-- [ ] **GRPH-01**: Neo4j RELATES_TO rate below 30% (verified with Cypher count query), down from 81%
-- [ ] **GRPH-02**: `neo4j-graphrag` SimpleKGPipeline integrated with `allowed_types` vocabulary constraint in extraction prompt
-- [ ] **GRPH-03**: Extraction prompt enumerates controlled vocabulary with worked examples — LLM selects from vocabulary, not free-form generation
+- [x] **GRPH-01**: Neo4j RELATES_TO rate below 30% (verified with Cypher count query), down from 81%
+- [x] **GRPH-02**: `neo4j-graphrag` SimpleKGPipeline integrated with `allowed_types` vocabulary constraint in extraction prompt
+- [x] **GRPH-03**: Extraction prompt enumerates controlled vocabulary with worked examples — LLM selects from vocabulary, not free-form generation
 - [x] **GRPH-04**: `neo4j-driver` deprecated package replaced with `neo4j` 6.1.0
 - [x] **GRPH-05**: Entity extraction validates against controlled vocabulary before Neo4j write — rejects or normalizes unknown types
 - [x] **GRPH-06**: Relationship vocabulary pruned to actively-used types based on empirical analysis of current graph data
@@ -45,13 +45,13 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Recall Quality
 
-- [ ] **RECL-01**: Reinforcement loop wired — memory IDs from recall results call reinforce endpoint, boosting frequently-accessed memories
-- [ ] **RECL-02**: Decay applied to memories not accessed within configurable window — rarely-recalled memories lose salience
-- [ ] **RECL-03**: Noise filter strengthened — expanded regex patterns + improved extraction prompt reduce noise rate below 5% (from ~13%)
-- [ ] **RECL-04**: Neo4j query timeout set to 800ms (from unbounded) — recall never blocks on slow graph queries
-- [ ] **RECL-05**: Qdrant and Neo4j queries run in parallel with independent timeouts — total recall latency under 1s P95
-- [ ] **RECL-06**: Semantic domain disambiguation prevents cross-domain bleed within an agent — "tools" in leatherwork context doesn't surface vehicle maintenance memories
-- [ ] **RECL-07**: Sufficiency gate thresholds tuned against ground-truth corpus — configurable confidence threshold for when to invoke graph fallback
+- [x] **RECL-01**: Reinforcement loop wired — memory IDs from recall results call reinforce endpoint, boosting frequently-accessed memories
+- [x] **RECL-02**: Decay applied to memories not accessed within configurable window — rarely-recalled memories lose salience
+- [x] **RECL-03**: Noise filter strengthened — expanded regex patterns + improved extraction prompt reduce noise rate below 5% (from ~13%)
+- [x] **RECL-04**: Neo4j query timeout set to 800ms (from unbounded) — recall never blocks on slow graph queries
+- [x] **RECL-05**: Qdrant and Neo4j queries run in parallel with independent timeouts — total recall latency under 1s P95
+- [x] **RECL-06**: Semantic domain disambiguation prevents cross-domain bleed within an agent — "tools" in leatherwork context doesn't surface vehicle maintenance memories
+- [x] **RECL-07**: Sufficiency gate thresholds tuned against ground-truth corpus — configurable confidence threshold for when to invoke graph fallback
 
 ### Observability
 
@@ -104,9 +104,9 @@ Deferred to future milestone. Tracked but not in current roadmap.
 | INTG-05 | Phase 2 | Complete |
 | INTG-06 | Phase 2 | Complete |
 | INTG-07 | Phase 2 | Complete |
-| GRPH-01 | Phase 3 | Pending |
-| GRPH-02 | Phase 3 | Pending |
-| GRPH-03 | Phase 3 | Pending |
+| GRPH-01 | Phase 3 | Complete |
+| GRPH-02 | Phase 3 | Complete |
+| GRPH-03 | Phase 3 | Complete |
 | GRPH-04 | Phase 3 | Complete |
 | GRPH-05 | Phase 3 | Complete |
 | GRPH-06 | Phase 3 | Complete |
@@ -116,13 +116,13 @@ Deferred to future milestone. Tracked but not in current roadmap.
 | EXTR-04 | Phase 4 | Complete |
 | EXTR-05 | Phase 4 | Complete |
 | EXTR-06 | Phase 4 | Complete |
-| RECL-01 | Phase 5 | Pending |
-| RECL-02 | Phase 5 | Pending |
-| RECL-03 | Phase 5 | Pending |
-| RECL-04 | Phase 5 | Pending |
-| RECL-05 | Phase 5 | Pending |
-| RECL-06 | Phase 5 | Pending |
-| RECL-07 | Phase 5 | Pending |
+| RECL-01 | Phase 5 | Complete |
+| RECL-02 | Phase 5 | Complete |
+| RECL-03 | Phase 5 | Complete |
+| RECL-04 | Phase 5 | Complete |
+| RECL-05 | Phase 5 | Complete |
+| RECL-06 | Phase 5 | Complete |
+| RECL-07 | Phase 5 | Complete |
 | OBSV-01 | Phase 6 | Pending |
 | OBSV-02 | Phase 6 | Pending |
 | OBSV-03 | Phase 6 | Pending |
@@ -131,8 +131,10 @@ Deferred to future milestone. Tracked but not in current roadmap.
 **Coverage:**
 - v1 requirements: 35 total
 - Mapped to phases: 35
-- Unmapped: 0 ✓
+- Complete: 31 (89%)
+- Pending: 4 (OBSV-01–04)
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-24*
-*Last updated: 2026-02-24 after initial definition*
+*Last updated: 2026-02-26 — stale checkboxes fixed per v1.0 audit*

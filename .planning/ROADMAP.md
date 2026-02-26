@@ -12,13 +12,14 @@ Six phases that move from broken to production-grade: establish measurable groun
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Test Infrastructure** - Ground-truth corpus and end-to-end test coverage for all memory paths (gap closure in progress)
+- [x] **Phase 1: Test Infrastructure** - Ground-truth corpus and end-to-end test coverage for all memory paths (gap closure in progress)
 - [x] **Phase 2: Data Integrity** - Crash-safe locking, transactional rollback, workspace flush reliability, orphan cleanup (completed 2026-02-25)
 - [x] **Phase 2.1: Fix addMemories Session Wiring** - INSERTED: Gap closure — wire session_id through distillation → Qdrant path (completed 2026-02-25)
-- [ ] **Phase 3: Graph Extraction Overhaul** - Neo4j RELATES_TO below 30%, typed relationships via neo4j-graphrag
+- [x] **Phase 3: Graph Extraction Overhaul** - Neo4j RELATES_TO below 30%, typed relationships via neo4j-graphrag
 - [x] **Phase 4: Extraction Pipeline Completion** - Contradiction wiring, cross-chunk dedup, AbortSignal, Mem0 infer=False (3/4 plans complete) (completed 2026-02-26)
-- [ ] **Phase 5: Recall Quality** - Reinforcement loop, evolution wiring, noise filtering, latency improvements
-- [ ] **Phase 6: Observability** - Unified health endpoint, degraded event emission, corpus audit tooling
+- [x] **Phase 5: Recall Quality** - Reinforcement loop, evolution wiring, noise filtering, latency improvements (completed 2026-02-26)
+- [ ] **Phase 5.1: Emergency Distillation Sidecar Wiring** - INSERTED: Gap closure — wire sidecarUrl through emergency distillation path in context.ts
+- [ ] **Phase 6: Observability** - Unified health endpoint, degraded event emission, corpus audit tooling (gap closure — Phase 6 never started)
 
 ## Phase Details
 
@@ -119,6 +120,23 @@ Plans:
   5. Recall P95 latency is under 1 second measured against representative queries
   6. "tools" in a leatherwork conversation does not surface vehicle maintenance memories for the same agent — domain disambiguation prevents cross-domain bleed
   7. Sufficiency gate thresholds are tuned against the corpus — configurable confidence threshold determines when graph fallback is invoked
+**Plans:** 4/4 plans complete
+
+Plans:
+- [ ] 05-01-PLAN.md — Reinforcement loop wiring + exponential decay
+- [ ] 05-02-PLAN.md — Noise filtering at extraction and recall time
+- [ ] 05-03-PLAN.md — Parallel Qdrant + Neo4j with 800ms timeout
+- [ ] 05-04-PLAN.md — Domain disambiguation re-ranking + sufficiency gate tuning
+
+### Phase 5.1: Emergency Distillation Sidecar Wiring
+**INSERTED** — Gap closure from v1.0 milestone audit
+**Goal**: Emergency distillation path passes sidecarUrl so contradiction invalidation, cross-chunk dedup, and evolution pre-check are not silently bypassed on context overflow
+**Depends on**: Phase 5
+**Requirements**: (tightens EXTR-01, EXTR-02, EXTR-05 — marked complete but edge case bypasses sidecar enrichment)
+**Gap Closure:** Closes MISSING-01 integration gap from v1.0 audit
+**Success Criteria** (what must be TRUE):
+  1. `distillSession()` in context.ts emergency path receives and forwards `sidecarUrl` — sidecar enrichment (dedup, evolution, invalidation) runs on emergency distills
+  2. Test confirms emergency distillation path invokes sidecar endpoints
 **Plans**: TBD
 
 ### Phase 6: Observability
@@ -143,6 +161,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 (can overlap with 3) → 5 
 | 2. Data Integrity | 4/4 | Complete    | 2026-02-25 |
 | 2.1 Fix addMemories Session Wiring | 0/1 | Complete    | 2026-02-25 |
 | 3. Graph Extraction Overhaul | 2/3 | In Progress|  |
-| 4. Extraction Pipeline Completion | 4/4 | Complete   | 2026-02-26 |
-| 5. Recall Quality | 0/TBD | Not started | - |
+| 4. Extraction Pipeline Completion | 4/4 | Complete    | 2026-02-26 |
+| 5. Recall Quality | 4/4 | Complete   | 2026-02-26 |
+| 5.1 Emergency Distillation Sidecar Wiring | 0/TBD | Not started | - |
 | 6. Observability | 0/TBD | Not started | - |
