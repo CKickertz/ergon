@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-24)
 
 **Core value:** Agents remember everything important, surface nothing irrelevant, and maintain their own memory health without intervention.
-**Current focus:** Phase 4 — Extraction Pipeline Completion
+**Current focus:** Phase 5 — Recall Quality
 
 ## Current Position
 
-Phase: 4 of 6 (Extraction Pipeline Completion)
-Plan: 4 of 4 in current phase (04-04 complete — AbortSignal threading, cancelDistillation export, POST distill/cancel endpoint)
-Status: Phase 4 complete
-Last activity: 2026-02-26 — Plan 04-04 complete; AbortSignal threading through full pipeline, cancel API endpoint
+Phase: 5 of 6 (Recall Quality)
+Plan: 4 of 4 in current phase (05-04 complete — domain re-ranking via token Jaccard overlap, hierarchical sufficiency config, tune-sufficiency.ts)
+Status: Phase 5 complete — ready for Phase 6
+Last activity: 2026-02-26 — Plan 05-04 complete; domain relevance re-ranking in /search, sufficiency config hierarchy verified, tuning script created
 
-Progress: [██████████] 72%
+Progress: [██████████████] 87%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 11
-- Average duration: 11 min
-- Total execution time: ~1.8 hours
+- Total plans completed: 13
+- Average duration: 10 min
+- Total execution time: ~2.1 hours
 
 **By Phase:**
 
@@ -31,9 +31,10 @@ Progress: [██████████] 72%
 | 02-data-integrity | 4 | ~66 min | ~17 min |
 | 03-graph-extraction-overhaul | 2 | ~9 min | ~5 min |
 | 04-extraction-pipeline-completion | 4 | 30 min | 7.5 min |
+| 05-recall-quality (partial) | 3 | ~17 min | ~6 min |
 
 **Recent Trend:**
-- Last 5 plans: ~15 min, 3 min, 4 min, 3 min, 7 min
+- Last 5 plans: 3 min, 4 min, 3 min, 7 min, 2 min
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -89,6 +90,20 @@ Recent decisions affecting current work:
 - [Phase 04-extraction-pipeline-completion / 04-04]: AbortController created per-distillSession call; external opts.signal linked via addEventListener to internal controller
 - [Phase 04-extraction-pipeline-completion / 04-04]: Signal propagated through opts object in summarizeInStages (not positional param) — avoids breaking existing test callers
 - [Phase 04-extraction-pipeline-completion / 04-04]: Cancel returns {ok: true, cancelled: boolean} immediately — does not await distillation; pipeline finally handles cleanup
+- [Phase 05-recall-quality]: Jaccard threshold 0.25 for reinforcement — permissive, false negatives hurt learning more than false positives
+- [Phase 05-recall-quality]: Exponential decay uses days-since-last-access from Neo4j last_accessed timestamp (not tick count)
+- [Phase 05-recall-quality]: New memories without MemoryAccess Neo4j node receive no decay — full salience until first access
+- [Phase 05-recall-quality / 05-02]: Soft boundaries at recall time: 0.3x score penalty instead of removal — noisy results stay ranked lower but remain in output
+- [Phase 05-recall-quality / 05-02]: Module-level compiled regex patterns in Python for performance in hot /search path
+- [Phase 05-recall-quality / 05-02]: Consistent 15-char minimum length at both extraction time and recall time
+- [Phase 05-recall-quality / 05-03]: Direct Qdrant query bypasses Mem0 mem.search() which calls both Qdrant and Neo4j sequentially
+- [Phase 05-recall-quality / 05-03]: 800ms Neo4j timeout via asyncio.wait_for — on timeout recall returns Qdrant-only results
+- [Phase 05-recall-quality / 05-03]: return_exceptions=True in asyncio.gather allows Qdrant and Neo4j failures to be handled independently
+- [Phase 05-recall-quality / 05-03]: Result deduplication by memory ID keeps highest combined_score (respects graph_weight weighting)
+- [Phase 05-recall-quality / 05-04]: Token Jaccard overlap for domain relevance — no API calls in hot path, Thread context: marker provides domain signal
+- [Phase 05-recall-quality / 05-04]: min_factor=0.6 in _domain_relevance_score — cross-domain penalty max 40%, never excluded (soft boundaries)
+- [Phase 05-recall-quality / 05-04]: _apply_domain_reranking skips when no Thread context: in query — avoids spurious penalty on bare queries
+- [Phase 05-recall-quality / 05-04]: Hierarchical sufficiency config confirmed working via Zod .default({}) — partial pipeline.json inherits unset fields from global defaults
 
 ### Pending Todos
 
@@ -102,5 +117,5 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-26
-Stopped at: Completed 04-extraction-pipeline-completion 04-04-PLAN.md — AbortSignal threading and cancel API endpoint
+Stopped at: Completed 05-recall-quality 05-04-PLAN.md — domain re-ranking, hierarchical sufficiency config, tune-sufficiency.ts
 Resume file: None
