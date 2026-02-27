@@ -23,7 +23,7 @@ import neo4j as _neo4j
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
+from qdrant_client.models import FieldCondition, Filter, IsNullCondition, MatchValue, PayloadField, PointStruct
 
 from .config import LLM_BACKEND, QDRANT_HOST, QDRANT_PORT
 from .entity_resolver import (
@@ -44,6 +44,22 @@ def _extract_entities_for_episode(text: str) -> list[str]:
 
 logger = logging.getLogger("aletheia_memory")
 router = APIRouter()
+
+# Shared Qdrant client — set from app lifespan, avoids per-request instantiation (#341)
+_shared_qdrant: QdrantClient | None = None
+
+
+def set_shared_qdrant(client: QdrantClient) -> None:
+    """Set the shared Qdrant client (called from app lifespan)."""
+    global _shared_qdrant
+    _shared_qdrant = client
+
+
+def _qdrant() -> QdrantClient:
+    """Return the shared Qdrant client."""
+    if _shared_qdrant is None:
+        raise RuntimeError("Qdrant client not initialized — app lifespan not started")
+    return _shared_qdrant
 
 
 def _extract_results(raw: Any, key: str = "results") -> Any:
@@ -270,9 +286,6 @@ async def add_memory(req: AddRequest, request: Request) -> dict[str, Any]:
             # Use Mem0's vector store directly for embedding-only storage
             try:
                 import uuid as _uuid
-
-                from qdrant_client import QdrantClient
-                from qdrant_client.models import PointStruct
                 embedder: Any = mem.embedding_model
                 vector: Any = await asyncio.to_thread(embedder.embed, req.text)
                 point_id = str(_uuid.uuid4())
@@ -284,7 +297,7 @@ async def add_memory(req: AddRequest, request: Request) -> dict[str, Any]:
                     "created_at": datetime.now(UTC).isoformat(),
                     **(req.metadata or {}),
                 }
-                qclient = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+                qclient = _qdrant()
                 qclient.upsert(
                     collection_name="aletheia_memories",
                     points=[PointStruct(id=point_id, vector=vector, payload=payload)],
@@ -388,7 +401,6 @@ def _apply_confidence_weight(results: list[dict[str, Any]]) -> list[dict[str, An
                 "RETURN mid, m.access_count AS accesses, m.last_accessed AS last_accessed",
                 ids=memory_ids,
             ).data()
-        driver.close()
         mark_neo4j_ok()
         now = datetime.now(UTC)
         access_map: dict[str, tuple[int, str | None]] = {}
@@ -568,7 +580,7 @@ async def add_batch(req: AddBatchRequest, request: Request) -> dict[str, Any]:
         return {"ok": True, "added": 0, "skipped": 0, "errors": 0}
 
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
         now = datetime.now(UTC).isoformat()
 
         # Content hash dedup — batch check existing hashes
@@ -927,13 +939,13 @@ async def _collect_qdrant_metrics(
     if not qdrant_ok:
         return {"orphan_count": None, "entries_by_agent": None, "total_entries": None}
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
 
-        # Orphan count — entries with source == "after_turn"
+        # Orphan count — entries missing agent_id (unattributed memories)
         orphan_result = client.count(
             collection_name=COLLECTION_NAME,
             count_filter=Filter(
-                must=[FieldCondition(key="source", match=MatchValue(value="after_turn"))]
+                must=[IsNullCondition(is_null=PayloadField(key="agent_id"))]
             ),
         )
         orphan_count = orphan_result.count
@@ -984,7 +996,7 @@ async def _collect_noise_rate(qdrant_ok: bool) -> float | None:
     if not qdrant_ok:
         return None
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
         scroll_result = client.scroll(
             collection_name=COLLECTION_NAME,
             limit=500,
@@ -1022,7 +1034,6 @@ async def _collect_neo4j_metrics(neo4j_ok: bool) -> dict[str, Any]:
             total_rels: int = total_single["c"] if total_single else 0
             relates_single = session.run("MATCH ()-[r:RELATES_TO]->() RETURN count(r) AS c").single()
             relates_count: int = relates_single["c"] if relates_single else 0
-        driver.close()
         mark_neo4j_ok()
         relates_to_rate = relates_count / total_rels if total_rels > 0 else None
         return {"relates_to_rate": relates_to_rate, "total_relationships": total_rels}
@@ -1258,7 +1269,6 @@ async def graph_stats() -> dict[str, Any]:
                 "MATCH ()-[r]->() WITH type(r) AS t, count(*) AS c WHERE c = 1 RETURN count(t) AS c"
             ).single()
             singleton_types: int = singleton_single["c"] if singleton_single else 0
-        driver.close()
         mark_neo4j_ok()
 
         return {
@@ -1408,7 +1418,6 @@ async def graph_export(
                     "top_nodes": top_names,
                 })
 
-        driver.close()
 
         return {
             "ok": True,
@@ -1486,7 +1495,6 @@ async def graph_search(
                 else:
                     results.append(node)
 
-        driver.close()
         return {"ok": True, "results": results, "total": len(results)}
     except Exception as e:
         mark_neo4j_down()
@@ -1568,7 +1576,6 @@ def _neo4j_expand_sync(query: str, user_id: str, graph_depth: int = 1) -> list[s
                     name = record["name"]
                     if name:
                         neighbors.append(name)
-        driver.close()
         mark_neo4j_ok()
     except Exception as e:
         mark_neo4j_down()
@@ -1614,7 +1621,7 @@ def _qdrant_search_direct(
     try:
         embedder: Any = mem.embedding_model
         vector: list[float] = embedder.embed(query)
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
         results = client.query_points(
             collection_name=COLLECTION_NAME,
             query=vector,
@@ -1929,7 +1936,6 @@ async def retract_memory(req: RetractRequest, request: Request) -> dict[str, Any
                         if record and record["deleted"] > 0:
                             neo4j_removed.extend(record["affected"])
                             logger.info("Retract cascade: removed %d rels for entity '%s'", record['deleted'], entity)
-            driver.close()
             mark_neo4j_ok()
         except Exception:
             mark_neo4j_down()
@@ -2025,7 +2031,6 @@ async def _record_episode(text: str, agent_id: str, metadata: dict[str, Any] | N
                     """,
                     name=entity_name, ep_id=episode_id, now=now,
                 )
-        driver.close()
         mark_neo4j_ok()
         logger.debug("Episode %s: %d entities linked", episode_id, len(entities))
     except Exception:
@@ -2074,7 +2079,6 @@ async def add_foresight(req: ForesightAddRequest) -> dict[str, Any]:
                 expiry=req.expiry,
                 weight=req.weight,
             )
-        driver.close()
         mark_neo4j_ok()
         return {"ok": True, "entity": req.entity, "signal": req.signal}
     except Exception as e:
@@ -2113,7 +2117,6 @@ async def active_foresight() -> dict[str, Any]:
                 }
                 for r in result
             ]
-        driver.close()
         mark_neo4j_ok()
         return {"ok": True, "signals": signals}
     except Exception as e:
@@ -2153,7 +2156,6 @@ async def decay_foresight() -> dict[str, Any]:
             )
             delete_single = delete_result.single()
             deleted: int = delete_single["deleted"] if delete_single else 0
-        driver.close()
         mark_neo4j_ok()
         return {"ok": True, "decayed": decayed, "deleted": deleted}
     except Exception as e:
@@ -2265,7 +2267,6 @@ async def _generate_links(mem: Any, new_text: str, user_id: str) -> list[dict[st
                         description=link["description"],
                         score=link["score"],
                     )
-            driver.close()
             mark_neo4j_ok()
             logger.info("Generated %d memory links for new memory", len(links))
         except Exception:
@@ -2313,7 +2314,6 @@ async def analyze_graph(req: GraphAnalyzeRequest) -> dict[str, Any]:
 
         node_count: int = graph.number_of_nodes()
         if node_count == 0:
-            driver.close()
             return {"ok": True, "nodes": 0, "message": "Empty graph"}
 
         # PageRank
@@ -2383,7 +2383,6 @@ async def analyze_graph(req: GraphAnalyzeRequest) -> dict[str, Any]:
                     scores_stored += len(chunk)
 
         edge_count: int = graph.number_of_edges()
-        driver.close()
 
         return {
             "ok": True,
@@ -2449,7 +2448,6 @@ async def search_enhanced(req: EnhancedSearchRequest, request: Request) -> dict[
                     record = result.single()
                     if record and record["canonical"] != entity:
                         canonical_names[entity] = record["canonical"]
-            driver.close()
             mark_neo4j_ok()
         except Exception:
             mark_neo4j_down()
@@ -2650,7 +2648,6 @@ async def entity_detail(name: str, request: Request) -> dict[str, Any]:
                     **({"props": rel["props"]} if rel["props"] else {}),
                 })
 
-        driver.close()
         mark_neo4j_ok()
     except HTTPException:
         raise
@@ -2716,7 +2713,6 @@ async def delete_entity(name: str) -> dict[str, Any]:
                 "RETURN rels",
                 name=name,
             ).single()
-        driver.close()
         mark_neo4j_ok()
 
         if result is None:
@@ -2754,7 +2750,6 @@ async def flag_entity(name: str, request: Request) -> dict[str, Any]:
                 name=name,
                 flagged=flagged,
             ).single()
-        driver.close()
         mark_neo4j_ok()
 
         if result is None:
@@ -2817,7 +2812,6 @@ async def merge_entities(req: EntityMergeRequest) -> dict[str, Any]:
             # Delete source node
             session.run("MATCH (n {name: $name}) DETACH DELETE n", name=req.source)
 
-        driver.close()
         mark_neo4j_ok()
         logger.info("Merged entity '%s' → '%s' (%d relationships redirected)", req.source, req.target, redirected)
         return {"ok": True, "source": req.source, "target": req.target, "relationships_redirected": redirected}
@@ -2831,7 +2825,6 @@ async def merge_entities(req: EntityMergeRequest) -> dict[str, Any]:
                 driver = neo4j_driver()
                 with _neo4j_session(driver) as session:
                     session.run("MATCH (n {name: $name}) DETACH DELETE n", name=req.source)
-                driver.close()
                 mark_neo4j_ok()
                 logger.info("Merged (fallback, rels lost) entity '%s' → '%s'", req.source, req.target)
                 return {"ok": True, "source": req.source, "target": req.target,
@@ -2963,7 +2956,7 @@ async def add_direct_v2(req: AddDirectRequest, request: Request) -> dict[str, An
 
     try:
         content_hash = _content_hash(text)
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
 
         # Content hash dedup (exact match)
         existing = client.scroll(
@@ -3067,7 +3060,7 @@ async def correct_memory(req: CorrectMemoryRequest, request: Request) -> dict[st
         return {"ok": False, "error": "empty corrected_text"}
 
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
 
         # Find the memory to correct via semantic search
         query_vector = (await _embed_texts(mem, [req.query]))[0]
@@ -3150,7 +3143,7 @@ async def forget_memory(req: ForgetMemoryRequest, request: Request) -> dict[str,
     mem = _get_memory(request)
 
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
 
         # Search for matching memories
         query_vector = (await _embed_texts(mem, [req.query]))[0]
@@ -3218,7 +3211,7 @@ async def memory_health(request: Request, user_id: str = "default") -> dict[str,
     mem = _get_memory(request)
 
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
         # Get collection info for total count
         collection = client.get_collection(COLLECTION_NAME)
         total: int = collection.points_count or 0
@@ -3339,7 +3332,6 @@ async def graph_timeline(
                 limit=limit,
             )
             rows: list[dict[str, Any]] = result.data()
-        driver.close()
         mark_neo4j_ok()
     except Exception as e:
         mark_neo4j_down()
@@ -3488,7 +3480,6 @@ async def graph_drift(request: Request, user_id: str = "default", stale_days: in
             ).single()
             total_count = total["total"] if total else 0
 
-        driver.close()
         mark_neo4j_ok()
     except Exception as e:
         mark_neo4j_down()
