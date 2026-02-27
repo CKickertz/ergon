@@ -1,9 +1,12 @@
 // Diagnostic checks for `aletheia doctor`
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { paths } from "../taxis/paths.js";
 import { loadConfig } from "../taxis/loader.js";
 import type { AletheiaConfig } from "../taxis/schema.js";
+import { readJson } from "./fs.js";
 
 export interface DiagnosticResult {
   name: string;
@@ -18,6 +21,9 @@ export interface DiagnosticResult {
 type DiagnosticCheck = (config: AletheiaConfig | null) => DiagnosticResult;
 
 const checks: DiagnosticCheck[] = [
+  checkBootstrapAnchor,
+  checkNousScaffoldDirs,
+  checkWorkspaceIndexHealth,
   checkConfigValid,
   checkWorkspacesExist,
   checkSharedDirs,
@@ -28,6 +34,126 @@ const checks: DiagnosticCheck[] = [
   checkSignalConfig,
   checkCredentialsDir,
 ];
+
+function checkBootstrapAnchor(_config: AletheiaConfig | null): DiagnosticResult {
+  const path = join(homedir(), ".aletheia", "anchor.json");
+  const raw = readJson<Record<string, unknown>>(path);
+
+  if (raw === null) {
+    return {
+      name: "bootstrap_anchor",
+      status: "warn",
+      message: `anchor.json not found at ${path} — run 'aletheia init' to configure your deployment`,
+    };
+  }
+
+  if (typeof raw["nousDir"] !== "string" || typeof raw["deployDir"] !== "string") {
+    return {
+      name: "bootstrap_anchor",
+      status: "error",
+      message: `anchor.json at ${path} is missing nousDir or deployDir`,
+    };
+  }
+
+  const nousDir = raw["nousDir"] as string;
+  const deployDirVal = raw["deployDir"] as string;
+  const nousExists = existsSync(nousDir);
+  const deployExists = existsSync(deployDirVal);
+
+  const lines = [
+    `anchor.json: ${path}`,
+    `  nousDir:   ${nousDir}${nousExists ? "" : "  (directory does not exist)"}`,
+    `  deployDir: ${deployDirVal}${deployExists ? "" : "  (directory does not exist)"}`,
+  ];
+
+  return {
+    name: "bootstrap_anchor",
+    status: nousExists && deployExists ? "ok" : "warn",
+    message: lines.join("\n"),
+  };
+}
+
+function checkNousScaffoldDirs(_config: AletheiaConfig | null): DiagnosticResult {
+  const anchorRaw = readJson<Record<string, unknown>>(join(homedir(), ".aletheia", "anchor.json"));
+  if (anchorRaw === null || typeof anchorRaw["nousDir"] !== "string") {
+    return {
+      name: "nous_scaffold",
+      status: "warn",
+      message: "Skipped (anchor.json not found or nousDir missing)",
+    };
+  }
+  const nousDir = anchorRaw["nousDir"] as string;
+  const required = [
+    join(nousDir, "_shared", "workspace", "plans"),
+    join(nousDir, "_shared", "workspace", "specs"),
+    join(nousDir, "_shared", "workspace", "standards"),
+    join(nousDir, "_shared", "workspace", "references"),
+  ];
+  const missing = required.filter((d) => !existsSync(d));
+  if (missing.length === 0) {
+    return {
+      name: "nous_scaffold",
+      status: "ok",
+      message: `_shared/ scaffold complete (${required.length} dirs)`,
+    };
+  }
+  return {
+    name: "nous_scaffold",
+    status: "warn",
+    message: `Missing scaffold dirs: ${missing.map((d) => d.replace(nousDir + "/", "")).join(", ")} — run 'aletheia init' to fix`,
+  };
+}
+
+function checkWorkspaceIndexHealth(_config: AletheiaConfig | null): DiagnosticResult {
+  const anchorRaw = readJson<Record<string, unknown>>(join(homedir(), ".aletheia", "anchor.json"));
+  if (anchorRaw === null || typeof anchorRaw["nousDir"] !== "string") {
+    return {
+      name: "workspace_index",
+      status: "warn",
+      message: "Skipped (anchor.json not found or nousDir missing)",
+    };
+  }
+  const nousDir = anchorRaw["nousDir"] as string;
+  const sharedDir = join(nousDir, "_shared");
+  if (!existsSync(sharedDir)) {
+    return {
+      name: "workspace_index",
+      status: "warn",
+      message: `_shared/ not found at ${sharedDir} — run 'aletheia init' to scaffold`,
+    };
+  }
+  const indexDir = join(sharedDir, ".aletheia-index");
+  if (!existsSync(indexDir)) {
+    return {
+      name: "workspace_index",
+      status: "warn",
+      message: "_shared/ exists but has no index yet — will be built at next daemon startup",
+    };
+  }
+  // Check for any manifest file to confirm index was successfully built
+  let manifests: string[] = [];
+  try {
+    manifests = readdirSync(indexDir).filter((f) => f.startsWith("manifest_"));
+  } catch {
+    return {
+      name: "workspace_index",
+      status: "error",
+      message: `Cannot read index directory ${indexDir} — check permissions`,
+    };
+  }
+  if (manifests.length === 0) {
+    return {
+      name: "workspace_index",
+      status: "warn",
+      message: "Index directory exists but no manifests found — index may still be building",
+    };
+  }
+  return {
+    name: "workspace_index",
+    status: "ok",
+    message: `Workspace index present (${manifests.length} manifest(s) in ${indexDir})`,
+  };
+}
 
 function checkConfigValid(_config: AletheiaConfig | null): DiagnosticResult {
   try {
@@ -329,6 +455,179 @@ export function formatResults(results: DiagnosticResult[], showFixes = false): s
     if (fixable > 0) parts.push(`${fixable} fixable (run with --fix)`);
     lines.push(parts.join(", "));
   }
+
+  return lines.join("\n");
+}
+
+// ── New async doctor checks ─────────────────────────────────────────────────
+
+export interface CheckResult {
+  name: string;
+  pass: boolean;
+  hint?: string;
+}
+
+const isTTY = Boolean(process.stdout.isTTY);
+const SYM_PASS = isTTY ? "\x1b[32m✓\x1b[0m" : "PASS";
+const SYM_FAIL = isTTY ? "\x1b[31m✗\x1b[0m" : "FAIL";
+
+function sectionHeader(label: string): string {
+  return `\n── ${label} ──\n`;
+}
+
+function formatCheckLine(label: string, pass: boolean, hint?: string): string {
+  const sym = pass ? SYM_PASS : SYM_FAIL;
+  const paddedLabel = label.padEnd(18);
+  const hintStr = (!pass && hint) ? `  — ${hint}` : "";
+  return `  ${sym}  ${paddedLabel}${hintStr}`;
+}
+
+export async function runConnectivityChecks(): Promise<CheckResult[]> {
+  let port = 18789;
+  try {
+    const config = loadConfig();
+    port = config.gateway?.port ?? 18789;
+  } catch { /* config unavailable — use default port */ }
+
+  const endpoints: Array<{ name: string; url: string }> = [
+    { name: "gateway", url: `http://localhost:${port}/health` },
+    { name: "qdrant", url: "http://localhost:6333/healthz" },
+    { name: "neo4j", url: "http://localhost:7474/" },
+    { name: "mem0", url: "http://localhost:8230/health" },
+  ];
+
+  return Promise.all(
+    endpoints.map(async ({ name, url }): Promise<CheckResult> => {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(3_000) });
+        if (res.ok) return { name, pass: true };
+        return { name, pass: false, hint: `HTTP ${res.status} — check service logs` };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const hint = msg.includes("ECONNREFUSED") || msg.includes("ENOTFOUND")
+          ? "run: aletheia start"
+          : msg.includes("TimeoutError") || msg.includes("timed out")
+            ? "service unreachable within 3s — check if running"
+            : "check service logs";
+        return { name, pass: false, hint };
+      }
+    }),
+  );
+}
+
+export function runDependencyChecks(): CheckResult[] {
+  const results: CheckResult[] = [];
+
+  const nodeVersion = process.version;
+  const majorStr = nodeVersion.slice(1).split(".").at(0) ?? "0";
+  const major = parseInt(majorStr, 10);
+  results.push(major >= 22
+    ? { name: "node", pass: true }
+    : { name: "node", pass: false, hint: `v${major} found — Node 22+ required` });
+
+  let hasContainer = false;
+  for (const cmd of ["docker", "podman"]) {
+    try {
+      execSync(`command -v ${cmd}`, { stdio: "ignore" });
+      hasContainer = true;
+      break;
+    } catch { /* not found */ }
+  }
+  results.push(hasContainer
+    ? { name: "docker/podman", pass: true }
+    : { name: "docker/podman", pass: false, hint: "install Docker or Podman" });
+
+  const artifactPath = join(paths.root, "infrastructure", "runtime", "dist", "entry.mjs");
+  const artifactExists = existsSync(artifactPath);
+  results.push(artifactExists
+    ? { name: "build artifact", pass: true }
+    : { name: "build artifact", pass: false, hint: "run: cd infrastructure/runtime && npx tsdown" });
+
+  return results;
+}
+
+export function runBootPersistenceChecks(): CheckResult[] {
+  const platform = process.platform;
+  const results: CheckResult[] = [];
+
+  if (platform === "darwin") {
+    const uid = (process.getuid?.() ?? 501).toString();
+    const gatewayEnabled = isLaunchdLoaded("com.aletheia.gateway", uid);
+    const memoryEnabled = isLaunchdLoaded("com.aletheia.memory", uid);
+    results.push(gatewayEnabled
+      ? { name: "boot:gateway", pass: true }
+      : { name: "boot:gateway", pass: false, hint: "run: aletheia enable" });
+    results.push(memoryEnabled
+      ? { name: "boot:memory", pass: true }
+      : { name: "boot:memory", pass: false, hint: "run: aletheia enable" });
+  } else {
+    const gatewayEnabled = isSystemdEnabled("aletheia.service");
+    const memoryEnabled = isSystemdEnabled("aletheia-memory.service");
+    results.push(gatewayEnabled
+      ? { name: "boot:gateway", pass: true }
+      : { name: "boot:gateway", pass: false, hint: "run: aletheia enable" });
+    results.push(memoryEnabled
+      ? { name: "boot:memory", pass: true }
+      : { name: "boot:memory", pass: false, hint: "run: aletheia enable" });
+  }
+
+  return results;
+}
+
+function isLaunchdLoaded(label: string, uid: string): boolean {
+  try {
+    execSync(`launchctl print gui/${uid}/${label}`, { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSystemdEnabled(unit: string): boolean {
+  // Check user-level first, then fall back to system-level
+  for (const scope of ["--user", ""]) {
+    try {
+      const cmd = scope ? `systemctl ${scope} is-enabled ${unit} 2>/dev/null` : `systemctl is-enabled ${unit} 2>/dev/null`;
+      const out = execSync(cmd, { encoding: "utf-8" }).trim();
+      if (out === "enabled") return true;
+    } catch { /* not found at this scope */ }
+  }
+  return false;
+}
+
+export function formatDoctorOutput(
+  connectivity: CheckResult[],
+  dependencies: CheckResult[],
+  bootPersistence: CheckResult[],
+): string {
+  const lines: string[] = [];
+  const allChecks = [...connectivity, ...dependencies, ...bootPersistence];
+  const passed = allChecks.filter((c) => c.pass).length;
+  const failed = allChecks.filter((c) => !c.pass).length;
+
+  const allConnDown = connectivity.length > 0 && connectivity.every((c) => !c.pass);
+  if (allConnDown) {
+    lines.push(isTTY
+      ? "\x1b[33m  Aletheia is not running — try: aletheia start\x1b[0m"
+      : "  Aletheia is not running — try: aletheia start");
+  }
+
+  lines.push(sectionHeader("Connectivity"));
+  for (const c of connectivity) {
+    lines.push(formatCheckLine(c.name, c.pass, c.hint));
+  }
+
+  lines.push(sectionHeader("Dependencies"));
+  for (const c of dependencies) {
+    lines.push(formatCheckLine(c.name, c.pass, c.hint));
+  }
+
+  lines.push(sectionHeader("Boot Persistence"));
+  for (const c of bootPersistence) {
+    lines.push(formatCheckLine(c.name, c.pass, c.hint));
+  }
+
+  lines.push(`\n  ${passed} checks passed, ${failed} failed`);
 
   return lines.join("\n");
 }

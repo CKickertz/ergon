@@ -23,7 +23,7 @@ import neo4j as _neo4j
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
+from qdrant_client.models import FieldCondition, Filter, IsNullCondition, MatchValue, PayloadField, PointStruct
 
 from .config import LLM_BACKEND, QDRANT_HOST, QDRANT_PORT
 from .entity_resolver import (
@@ -33,6 +33,7 @@ from .entity_resolver import (
     resolve_entity,
 )
 from .evolution import exponential_decay_penalty
+from .fts import index_memory as fts_index, index_batch as fts_index_batch, search_bm25, get_stats as fts_stats, remove_memory as fts_remove
 from .graph import mark_neo4j_down, mark_neo4j_ok, neo4j_available, neo4j_driver
 from .graph_extraction import extract_graph, extract_graph_batch
 
@@ -43,6 +44,22 @@ def _extract_entities_for_episode(text: str) -> list[str]:
 
 logger = logging.getLogger("aletheia_memory")
 router = APIRouter()
+
+# Shared Qdrant client — set from app lifespan, avoids per-request instantiation (#341)
+_shared_qdrant: QdrantClient | None = None
+
+
+def set_shared_qdrant(client: QdrantClient) -> None:
+    """Set the shared Qdrant client (called from app lifespan)."""
+    global _shared_qdrant
+    _shared_qdrant = client
+
+
+def _qdrant() -> QdrantClient:
+    """Return the shared Qdrant client."""
+    if _shared_qdrant is None:
+        raise RuntimeError("Qdrant client not initialized — app lifespan not started")
+    return _shared_qdrant
 
 
 def _extract_results(raw: Any, key: str = "results") -> Any:
@@ -130,6 +147,9 @@ class SearchRequest(BaseModel):
     agent_id: str | None = None
     limit: int = Field(default=10, ge=1, le=50)
     domains: list[str] | None = None
+    hybrid: bool = Field(default=True, description="Enable BM25+vector hybrid search")
+    vector_weight: float = Field(default=0.7, ge=0.0, le=1.0, description="Weight for vector scores in hybrid merge")
+    keyword_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Weight for BM25 keyword scores in hybrid merge")
 
 
 class ImportRequest(BaseModel):
@@ -266,9 +286,6 @@ async def add_memory(req: AddRequest, request: Request) -> dict[str, Any]:
             # Use Mem0's vector store directly for embedding-only storage
             try:
                 import uuid as _uuid
-
-                from qdrant_client import QdrantClient
-                from qdrant_client.models import PointStruct
                 embedder: Any = mem.embedding_model
                 vector: Any = await asyncio.to_thread(embedder.embed, req.text)
                 point_id = str(_uuid.uuid4())
@@ -280,11 +297,16 @@ async def add_memory(req: AddRequest, request: Request) -> dict[str, Any]:
                     "created_at": datetime.now(UTC).isoformat(),
                     **(req.metadata or {}),
                 }
-                qclient = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+                qclient = _qdrant()
                 qclient.upsert(
                     collection_name="aletheia_memories",
                     points=[PointStruct(id=point_id, vector=vector, payload=payload)],
                 )
+                # Also index in FTS5 for hybrid search
+                try:
+                    await asyncio.to_thread(fts_index, point_id, req.text, req.agent_id or "", req.user_id or "")
+                except Exception:
+                    logger.debug("FTS index failed for tier3 (non-critical)", exc_info=True)
                 return {"ok": True, "result": {"tier3_embed_only": True, "id": point_id}}
             except Exception as e:
                 logger.exception("Tier 3 embedding failed")
@@ -292,6 +314,17 @@ async def add_memory(req: AddRequest, request: Request) -> dict[str, Any]:
 
         result: Any = await asyncio.to_thread(mem.add, req.text, **kwargs)
         graph_degraded = False
+
+        # FTS5 keyword index — index the extracted memory text for BM25 search
+        try:
+            result_list: list[dict[str, Any]] = _as_result_list(result)
+            for r in result_list:
+                rid = r.get("id")
+                rmem = r.get("memory", req.text)
+                if rid:
+                    await asyncio.to_thread(fts_index, rid, rmem, req.agent_id or "", req.user_id or "")
+        except Exception:
+            logger.debug("FTS index failed (non-critical)", exc_info=True)
 
         # Autonomous link generation (A-Mem pattern) — fire and forget
         if LINK_GENERATION_ENABLED:
@@ -368,7 +401,6 @@ def _apply_confidence_weight(results: list[dict[str, Any]]) -> list[dict[str, An
                 "RETURN mid, m.access_count AS accesses, m.last_accessed AS last_accessed",
                 ids=memory_ids,
             ).data()
-        driver.close()
         mark_neo4j_ok()
         now = datetime.now(UTC)
         access_map: dict[str, tuple[int, str | None]] = {}
@@ -508,7 +540,7 @@ async def dedup_batch(req: DeduplicateRequest, request: Request) -> dict[str, An
 
     removed = len(texts) - len(kept_texts)
     if removed > 0:
-        logger.info(f"dedup_batch: removed {removed} near-duplicate(s) from {len(texts)} texts (threshold={req.threshold})")
+        logger.info("dedup_batch: removed %d near-duplicate(s) from %d texts (threshold=%s)", removed, len(texts), req.threshold)
 
     return {"deduplicated": kept_texts, "removed": removed}
 
@@ -548,7 +580,7 @@ async def add_batch(req: AddBatchRequest, request: Request) -> dict[str, Any]:
         return {"ok": True, "added": 0, "skipped": 0, "errors": 0}
 
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
         now = datetime.now(UTC).isoformat()
 
         # Content hash dedup — batch check existing hashes
@@ -642,7 +674,7 @@ async def add_batch(req: AddBatchRequest, request: Request) -> dict[str, Any]:
                 client.upsert(collection_name=COLLECTION_NAME, points=batch)
                 added += len(batch)
             except Exception as e:
-                logger.error(f"add_batch upsert failed for batch {i}: {e}")
+                logger.error("add_batch upsert failed for batch %d: %s", i, e)
                 errors += len(batch)
 
         total_skipped = len(existing_hashes) + skipped_semantic
@@ -681,12 +713,35 @@ async def search_memory(req: SearchRequest, request: Request) -> dict[str, Any]:
 
     t0 = time.time()
     try:
-        raw: Any = await asyncio.to_thread(mem.search, req.query, **kwargs)
+        # Launch vector search and (optionally) BM25 in parallel
+        vector_task = asyncio.to_thread(mem.search, req.query, **kwargs)
+
+        bm25_task = None
+        if req.hybrid:
+            bm25_task = asyncio.to_thread(
+                search_bm25, req.query, req.limit * 2,
+                agent_id=req.agent_id, user_id=req.user_id if req.user_id != "default" else None,
+            )
+
+        raw: Any = await vector_task
         results_list: list[dict[str, Any]] = _as_result_list(raw)
         for r in results_list:
             meta: dict[str, Any] = r.get("metadata") or {}
             if "created_at" in meta:
                 r["created_at"] = meta["created_at"]
+
+        # Merge BM25 results if hybrid enabled
+        if bm25_task is not None:
+            try:
+                bm25_hits = await bm25_task
+                results_list = _merge_hybrid_results(
+                    results_list, bm25_hits,
+                    vector_weight=req.vector_weight,
+                    keyword_weight=req.keyword_weight,
+                )
+            except Exception:
+                logger.debug("BM25 search failed, falling back to vector-only", exc_info=True)
+
         # Exclude forgotten and superseded memories
         results_list = [
             r for r in results_list
@@ -709,6 +764,62 @@ async def search_memory(req: SearchRequest, request: Request) -> dict[str, Any]:
     except Exception:
         logger.exception("search_memory failed")
         raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+def _merge_hybrid_results(
+    vector_results: list[dict[str, Any]],
+    bm25_hits: list,
+    vector_weight: float = 0.7,
+    keyword_weight: float = 0.3,
+) -> list[dict[str, Any]]:
+    """Merge vector and BM25 results using weighted combination.
+
+    Both score spaces are normalized to [0, 1] before combining.
+    Deduplication by memory_id ensures no duplicates.
+    """
+    # Index vector results by ID
+    merged: dict[str, dict[str, Any]] = {}
+
+    # Normalize vector scores to [0, 1]
+    v_scores = [r.get("score", 0) for r in vector_results if r.get("score") is not None]
+    v_max = max(v_scores) if v_scores else 1.0
+    v_min = min(v_scores) if v_scores else 0.0
+    v_range = v_max - v_min if v_max > v_min else 1.0
+
+    for r in vector_results:
+        rid = r.get("id", "")
+        raw_score = r.get("score", 0) or 0
+        norm_v = (raw_score - v_min) / v_range if v_range > 0 else 0.5
+        merged[rid] = {**r, "_v_score": norm_v, "_k_score": 0.0}
+
+    # Normalize BM25 scores to [0, 1]
+    b_scores = [h.bm25_score for h in bm25_hits if h.bm25_score > 0]
+    b_max = max(b_scores) if b_scores else 1.0
+    b_min = min(b_scores) if b_scores else 0.0
+    b_range = b_max - b_min if b_max > b_min else 1.0
+
+    for hit in bm25_hits:
+        norm_k = (hit.bm25_score - b_min) / b_range if b_range > 0 else 0.5
+        if hit.memory_id in merged:
+            # Already have vector result — add keyword score
+            merged[hit.memory_id]["_k_score"] = norm_k
+        else:
+            # BM25-only result — no vector score
+            merged[hit.memory_id] = {
+                "id": hit.memory_id,
+                "memory": hit.content,
+                "score": 0,
+                "agent_id": hit.agent_id,
+                "user_id": hit.user_id,
+                "_v_score": 0.0,
+                "_k_score": norm_k,
+            }
+
+    # Compute combined score and sort
+    for r in merged.values():
+        r["score"] = vector_weight * r.pop("_v_score") + keyword_weight * r.pop("_k_score")
+
+    return sorted(merged.values(), key=lambda x: x.get("score", 0), reverse=True)
 
 
 @router.post("/graph_search")
@@ -790,6 +901,11 @@ async def delete_memory(memory_id: str, request: Request) -> dict[str, Any]:
     mem = _get_memory(request)
     try:
         await asyncio.to_thread(mem.delete, memory_id)
+        # Also remove from FTS index
+        try:
+            await asyncio.to_thread(fts_remove, memory_id)
+        except Exception:
+            logger.debug("FTS remove failed for %s (non-critical)", memory_id)
         return {"ok": True}
     except Exception:
         logger.exception("delete_memory failed")
@@ -823,13 +939,13 @@ async def _collect_qdrant_metrics(
     if not qdrant_ok:
         return {"orphan_count": None, "entries_by_agent": None, "total_entries": None}
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
 
-        # Orphan count — entries with source == "after_turn"
+        # Orphan count — entries missing agent_id (unattributed memories)
         orphan_result = client.count(
             collection_name=COLLECTION_NAME,
             count_filter=Filter(
-                must=[FieldCondition(key="source", match=MatchValue(value="after_turn"))]
+                must=[IsNullCondition(is_null=PayloadField(key="agent_id"))]
             ),
         )
         orphan_count = orphan_result.count
@@ -880,7 +996,7 @@ async def _collect_noise_rate(qdrant_ok: bool) -> float | None:
     if not qdrant_ok:
         return None
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
         scroll_result = client.scroll(
             collection_name=COLLECTION_NAME,
             limit=500,
@@ -918,7 +1034,6 @@ async def _collect_neo4j_metrics(neo4j_ok: bool) -> dict[str, Any]:
             total_rels: int = total_single["c"] if total_single else 0
             relates_single = session.run("MATCH ()-[r:RELATES_TO]->() RETURN count(r) AS c").single()
             relates_count: int = relates_single["c"] if relates_single else 0
-        driver.close()
         mark_neo4j_ok()
         relates_to_rate = relates_count / total_rels if total_rels > 0 else None
         return {"relates_to_rate": relates_to_rate, "total_relationships": total_rels}
@@ -1076,8 +1191,59 @@ async def health_check(request: Request, thresholds: str | None = None) -> dict[
             "sample_count": sample_count,
         },
         "flush": flush_data,
+        "fts": fts_stats(),
         "thresholds": evaluation["thresholds"],
     }
+
+
+@router.post("/fts/backfill")
+async def fts_backfill(request: Request) -> dict[str, Any]:
+    """Backfill the FTS5 index from existing Qdrant memories.
+    Safe to call multiple times — skips already-indexed entries."""
+    client = _qdrant()
+    indexed = 0
+    offset = None
+    batch_size = 100
+
+    while True:
+        points, offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=batch_size,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points:
+            break
+
+        batch = []
+        for p in points:
+            payload: dict[str, Any] = p.payload or {}
+            content = payload.get("memory", "") or payload.get("data", "")
+            if content and p.id:
+                batch.append({
+                    "memory_id": str(p.id),
+                    "content": content,
+                    "agent_id": payload.get("agent_id", ""),
+                    "user_id": payload.get("user_id", ""),
+                })
+
+        if batch:
+            count = await asyncio.to_thread(fts_index_batch, batch)
+            indexed += count
+
+        if offset is None:
+            break
+
+    stats = fts_stats()
+    logger.info("FTS backfill complete: %d new entries indexed (total: %d)", indexed, stats["indexed_count"])
+    return {"ok": True, "newly_indexed": indexed, **stats}
+
+
+@router.get("/fts/stats")
+async def fts_stats_endpoint() -> dict[str, Any]:
+    """Return FTS5 index statistics."""
+    return {"ok": True, **fts_stats()}
 
 
 @router.get("/graph_stats")
@@ -1103,7 +1269,6 @@ async def graph_stats() -> dict[str, Any]:
                 "MATCH ()-[r]->() WITH type(r) AS t, count(*) AS c WHERE c = 1 RETURN count(t) AS c"
             ).single()
             singleton_types: int = singleton_single["c"] if singleton_single else 0
-        driver.close()
         mark_neo4j_ok()
 
         return {
@@ -1253,7 +1418,6 @@ async def graph_export(
                     "top_nodes": top_names,
                 })
 
-        driver.close()
 
         return {
             "ok": True,
@@ -1331,7 +1495,6 @@ async def graph_search(
                 else:
                     results.append(node)
 
-        driver.close()
         return {"ok": True, "results": results, "total": len(results)}
     except Exception as e:
         mark_neo4j_down()
@@ -1413,7 +1576,6 @@ def _neo4j_expand_sync(query: str, user_id: str, graph_depth: int = 1) -> list[s
                     name = record["name"]
                     if name:
                         neighbors.append(name)
-        driver.close()
         mark_neo4j_ok()
     except Exception as e:
         mark_neo4j_down()
@@ -1459,7 +1621,7 @@ def _qdrant_search_direct(
     try:
         embedder: Any = mem.embedding_model
         vector: list[float] = embedder.embed(query)
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
         results = client.query_points(
             collection_name=COLLECTION_NAME,
             query=vector,
@@ -1656,9 +1818,9 @@ async def consolidate_memories(req: ConsolidateRequest, request: Request) -> dic
                 # Keep the source, delete the duplicate
                 await asyncio.to_thread(mem.delete, pair["duplicate"]["id"])
                 merged_count += 1
-                logger.info(f"Consolidated: deleted {pair['duplicate']['id']} (score={pair['score']})")
+                logger.info("Consolidated: deleted %s (score=%s)", pair['duplicate']['id'], pair['score'])
             except Exception as e:
-                logger.warning(f"Failed to delete duplicate {pair['duplicate']['id']}: {e}")
+                logger.warning("Failed to delete duplicate %s: %s", pair['duplicate']['id'], e)
 
     return {
         "ok": True,
@@ -1718,7 +1880,7 @@ async def fact_stats(request: Request, user_id: str = "default") -> dict[str, An
 # --- Phase 2.6: Forgetting Protocol ---
 
 
-RETRACTION_LOG = Path(os.environ.get("ALETHEIA_HOME", "/mnt/ssd/aletheia")) / "shared" / "memory" / "retractions.jsonl"
+RETRACTION_LOG = Path(os.environ.get("ALETHEIA_HOME", str(Path.home() / ".aletheia"))) / "shared" / "memory" / "retractions.jsonl"
 
 
 class RetractRequest(BaseModel):
@@ -1773,8 +1935,7 @@ async def retract_memory(req: RetractRequest, request: Request) -> dict[str, Any
                         record = result.single()
                         if record and record["deleted"] > 0:
                             neo4j_removed.extend(record["affected"])
-                            logger.info(f"Retract cascade: removed {record['deleted']} rels for entity '{entity}'")
-            driver.close()
+                            logger.info("Retract cascade: removed %d rels for entity '%s'", record['deleted'], entity)
             mark_neo4j_ok()
         except Exception:
             mark_neo4j_down()
@@ -1794,7 +1955,7 @@ async def retract_memory(req: RetractRequest, request: Request) -> dict[str, Any
                     "score": item.get("score", 0),
                 })
             except Exception as e:
-                logger.warning(f"Failed to retract {memory_id}: {e}")
+                logger.warning("Failed to retract %s: %s", memory_id, e)
 
         # Audit log
         _log_retraction(req, retracted, neo4j_removed)
@@ -1870,9 +2031,8 @@ async def _record_episode(text: str, agent_id: str, metadata: dict[str, Any] | N
                     """,
                     name=entity_name, ep_id=episode_id, now=now,
                 )
-        driver.close()
         mark_neo4j_ok()
-        logger.debug(f"Episode {episode_id}: {len(entities)} entities linked")
+        logger.debug("Episode %s: %d entities linked", episode_id, len(entities))
     except Exception:
         mark_neo4j_down()
         logger.warning("Episode recording failed (non-fatal)", exc_info=True)
@@ -1919,7 +2079,6 @@ async def add_foresight(req: ForesightAddRequest) -> dict[str, Any]:
                 expiry=req.expiry,
                 weight=req.weight,
             )
-        driver.close()
         mark_neo4j_ok()
         return {"ok": True, "entity": req.entity, "signal": req.signal}
     except Exception as e:
@@ -1958,7 +2117,6 @@ async def active_foresight() -> dict[str, Any]:
                 }
                 for r in result
             ]
-        driver.close()
         mark_neo4j_ok()
         return {"ok": True, "signals": signals}
     except Exception as e:
@@ -1998,7 +2156,6 @@ async def decay_foresight() -> dict[str, Any]:
             )
             delete_single = delete_result.single()
             deleted: int = delete_single["deleted"] if delete_single else 0
-        driver.close()
         mark_neo4j_ok()
         return {"ok": True, "decayed": decayed, "deleted": deleted}
     except Exception as e:
@@ -2110,9 +2267,8 @@ async def _generate_links(mem: Any, new_text: str, user_id: str) -> list[dict[st
                         description=link["description"],
                         score=link["score"],
                     )
-            driver.close()
             mark_neo4j_ok()
-            logger.info(f"Generated {len(links)} memory links for new memory")
+            logger.info("Generated %d memory links for new memory", len(links))
         except Exception:
             mark_neo4j_down()
             logger.warning("Failed to store memory links in Neo4j")
@@ -2158,7 +2314,6 @@ async def analyze_graph(req: GraphAnalyzeRequest) -> dict[str, Any]:
 
         node_count: int = graph.number_of_nodes()
         if node_count == 0:
-            driver.close()
             return {"ok": True, "nodes": 0, "message": "Empty graph"}
 
         # PageRank
@@ -2228,7 +2383,6 @@ async def analyze_graph(req: GraphAnalyzeRequest) -> dict[str, Any]:
                     scores_stored += len(chunk)
 
         edge_count: int = graph.number_of_edges()
-        driver.close()
 
         return {
             "ok": True,
@@ -2294,7 +2448,6 @@ async def search_enhanced(req: EnhancedSearchRequest, request: Request) -> dict[
                     record = result.single()
                     if record and record["canonical"] != entity:
                         canonical_names[entity] = record["canonical"]
-            driver.close()
             mark_neo4j_ok()
         except Exception:
             mark_neo4j_down()
@@ -2495,7 +2648,6 @@ async def entity_detail(name: str, request: Request) -> dict[str, Any]:
                     **({"props": rel["props"]} if rel["props"] else {}),
                 })
 
-        driver.close()
         mark_neo4j_ok()
     except HTTPException:
         raise
@@ -2561,13 +2713,12 @@ async def delete_entity(name: str) -> dict[str, Any]:
                 "RETURN rels",
                 name=name,
             ).single()
-        driver.close()
         mark_neo4j_ok()
 
         if result is None:
             raise HTTPException(status_code=404, detail=f"Entity '{name}' not found")
 
-        logger.info(f"Deleted entity '{name}' ({result['rels']} relationships removed)")
+        logger.info("Deleted entity '%s' (%d relationships removed)", name, result['rels'])
         return {"ok": True, "deleted": name, "relationships_removed": result["rels"]}
     except HTTPException:
         raise
@@ -2599,13 +2750,12 @@ async def flag_entity(name: str, request: Request) -> dict[str, Any]:
                 name=name,
                 flagged=flagged,
             ).single()
-        driver.close()
         mark_neo4j_ok()
 
         if result is None:
             raise HTTPException(status_code=404, detail=f"Entity '{name}' not found")
 
-        logger.info(f"{'Flagged' if flagged else 'Unflagged'} entity '{name}'")
+        logger.info("%s entity '%s'", "Flagged" if flagged else "Unflagged", name)
         return {"ok": True, "entity": result["name"], "flagged": result["flagged"]}
     except HTTPException:
         raise
@@ -2662,9 +2812,8 @@ async def merge_entities(req: EntityMergeRequest) -> dict[str, Any]:
             # Delete source node
             session.run("MATCH (n {name: $name}) DETACH DELETE n", name=req.source)
 
-        driver.close()
         mark_neo4j_ok()
-        logger.info(f"Merged entity '{req.source}' → '{req.target}' ({redirected} relationships redirected)")
+        logger.info("Merged entity '%s' → '%s' (%d relationships redirected)", req.source, req.target, redirected)
         return {"ok": True, "source": req.source, "target": req.target, "relationships_redirected": redirected}
     except HTTPException:
         raise
@@ -2676,9 +2825,8 @@ async def merge_entities(req: EntityMergeRequest) -> dict[str, Any]:
                 driver = neo4j_driver()
                 with _neo4j_session(driver) as session:
                     session.run("MATCH (n {name: $name}) DETACH DELETE n", name=req.source)
-                driver.close()
                 mark_neo4j_ok()
-                logger.info(f"Merged (fallback, rels lost) entity '{req.source}' → '{req.target}'")
+                logger.info("Merged (fallback, rels lost) entity '%s' → '%s'", req.source, req.target)
                 return {"ok": True, "source": req.source, "target": req.target,
                         "relationships_redirected": 0, "warning": "APOC not available, relationships not redirected"}
             except Exception as e2:
@@ -2774,7 +2922,7 @@ async def _check_contradictions(
         return contradictions
 
     except Exception as e:
-        logger.warning(f"Contradiction check failed: {e}")
+        logger.warning("Contradiction check failed: %s", e)
         return []
 
 
@@ -2808,7 +2956,7 @@ async def add_direct_v2(req: AddDirectRequest, request: Request) -> dict[str, An
 
     try:
         content_hash = _content_hash(text)
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
 
         # Content hash dedup (exact match)
         existing = client.scroll(
@@ -2873,6 +3021,12 @@ async def add_direct_v2(req: AddDirectRequest, request: Request) -> dict[str, An
             points=[PointStruct(id=point_id, vector=vector, payload=payload)],
         )
 
+        # FTS5 keyword index for hybrid search
+        try:
+            await asyncio.to_thread(fts_index, point_id, text, req.agent_id or "", req.user_id or "")
+        except Exception:
+            logger.debug("FTS index failed for add_direct (non-critical)", exc_info=True)
+
         # Graph extraction via SimpleKGPipeline — fire and forget
         backend: dict[str, Any] = getattr(request.app.state, "backend", LLM_BACKEND)
         graph_task: asyncio.Task[Any] = asyncio.create_task(extract_graph(text, backend=backend))
@@ -2882,9 +3036,9 @@ async def add_direct_v2(req: AddDirectRequest, request: Request) -> dict[str, An
         result: dict[str, Any] = {"ok": True, "result": "added", "id": point_id}
         if contradictions:
             result["contradictions"] = contradictions
-            logger.info(f"add_direct: stored '{text[:80]}' with {len(contradictions)} contradiction(s)")
+            logger.info("add_direct: stored '%.80s' with %d contradiction(s)", text, len(contradictions))
         else:
-            logger.info(f"add_direct: stored '{text[:80]}' (source={req.source}, agent={req.agent_id})")
+            logger.info("add_direct: stored '%.80s' (source=%s, agent=%s)", text, req.source, req.agent_id)
 
         return result
 
@@ -2906,7 +3060,7 @@ async def correct_memory(req: CorrectMemoryRequest, request: Request) -> dict[st
         return {"ok": False, "error": "empty corrected_text"}
 
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
 
         # Find the memory to correct via semantic search
         query_vector = (await _embed_texts(mem, [req.query]))[0]
@@ -2964,7 +3118,7 @@ async def correct_memory(req: CorrectMemoryRequest, request: Request) -> dict[st
             ],
         )
 
-        logger.info(f"memory/correct: '{old_text[:60]}' → '{corrected_text[:60]}' (reason: {req.reason})")
+        logger.info("memory/correct: '%.60s' → '%.60s' (reason: %s)", old_text, corrected_text, req.reason)
 
         return {
             "ok": True,
@@ -2989,7 +3143,7 @@ async def forget_memory(req: ForgetMemoryRequest, request: Request) -> dict[str,
     mem = _get_memory(request)
 
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
 
         # Search for matching memories
         query_vector = (await _embed_texts(mem, [req.query]))[0]
@@ -3034,7 +3188,7 @@ async def forget_memory(req: ForgetMemoryRequest, request: Request) -> dict[str,
 
         client.upsert(collection_name=COLLECTION_NAME, points=points_to_update)
 
-        logger.info(f"memory/forget: {len(matches)} memories forgotten (reason: {req.reason})")
+        logger.info("memory/forget: %d memories forgotten (reason: %s)", len(matches), req.reason)
 
         return {
             "ok": True,
@@ -3057,7 +3211,7 @@ async def memory_health(request: Request, user_id: str = "default") -> dict[str,
     mem = _get_memory(request)
 
     try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        client = _qdrant()
         # Get collection info for total count
         collection = client.get_collection(COLLECTION_NAME)
         total: int = collection.points_count or 0
@@ -3178,7 +3332,6 @@ async def graph_timeline(
                 limit=limit,
             )
             rows: list[dict[str, Any]] = result.data()
-        driver.close()
         mark_neo4j_ok()
     except Exception as e:
         mark_neo4j_down()
@@ -3327,7 +3480,6 @@ async def graph_drift(request: Request, user_id: str = "default", stale_days: in
             ).single()
             total_count = total["total"] if total else 0
 
-        driver.close()
         mark_neo4j_ok()
     except Exception as e:
         mark_neo4j_down()

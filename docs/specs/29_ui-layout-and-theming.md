@@ -2,7 +2,7 @@
 
 | Field       | Value                          |
 |-------------|--------------------------------|
-| Status      | Draft                          |
+| Status      | In Progress — light theme + agent activity done; layout overhaul pending |
 | Author      | Demiurge                       |
 | Created     | 2026-02-22                     |
 | Scope       | `ui/`                          |
@@ -317,6 +317,49 @@ Phases 2–4 are independent of each other. Phase 1 is the structural change; ph
 3. **Create agent UX.** Navigate to Settings. Rare action doesn't justify inline popover complexity.
 
 4. **Mobile agent bar.** No cap needed — practical limit is ~5 agents. Long-term: group agents or collapse to icon-only on overflow.
+
+---
+
+### Phase 5 — Planning Dashboard Redesign (from #328)
+
+The planning dashboard has an interaction bug (event swallowing, invisible overlay, or infinite SSE re-render) that makes it unusable in its current form. Beyond the fix, the layout needs a full redesign.
+
+**Current problems:**
+- Event swallowing or z-index issue makes dashboard non-interactive
+- Single flat view doesn't scale beyond simple projects
+- No visual density adaptation for different screen widths
+- Empty/idle states take up excessive space
+
+**Target layout:**
+
+```
+┌─────────────────────────────────────────────┐
+│ [Planning] [Execution] [Activity]    tabs   │
+├─────────────────────────────────────────────┤
+│ ▸ Quick Wins (3/5 complete)          [▾]    │
+│ ▸ Infrastructure (0/4)               [▾]    │
+│ ▸ CLI Foundation (not started)       [▾]    │
+│                                             │
+│ ▾ A2UI Canvas (2/6 in progress)      [▴]    │
+│   ├─ ✅ Server routes                       │
+│   ├─ 🔄 Canvas tool (running)              │
+│   ├─ ⬜ WebUI panel                        │
+│   └─ ⬜ Graph surface                      │
+└─────────────────────────────────────────────┘
+```
+
+**Design principles:**
+- **Tabs:** Planning (requirements + roadmap), Execution (phase progress + wave status), Activity (recent events + logs)
+- **Collapsible accordion sections** with counts (complete/total). Default: collapse completed phases, expand active.
+- **Width-adaptive density:** narrow screens show summary counts only; wide screens show full step lists inline.
+- **Empty state compression:** phases not started show as a single line, not an expanded empty card.
+
+**Changes:**
+- Investigate and fix the interaction bug (likely z-index, event propagation, or SSE reconnect loop)
+- Replace flat list with tabbed accordion layout
+- Add phase progress indicators (completion counts, status icons)
+- Width-responsive density (CSS container queries or media queries)
+- Compress empty/idle states
 
 ---
 

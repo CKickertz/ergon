@@ -29,8 +29,6 @@ KNOWN_ALIASES: dict[str, str] = {
     "ut_mccombs": "ut mccombs",
     "ut austin": "ut mccombs",
     "mccombs": "ut mccombs",
-    "acme_global": "acme",
-    "acme global": "acme",
     "ardent_llc": "ardent",
     "ardent llc": "ardent",
 }
@@ -339,7 +337,7 @@ def merge_duplicate_entities() -> dict[str, Any]:
             "invalid_deleted": deleted_count,
             "canonical_groups": len(canonical_map),
         }
-        logger.info(f"Entity merge: {result}")
+        logger.info("Entity merge: %s", result)
         return result
 
     except Exception as e:

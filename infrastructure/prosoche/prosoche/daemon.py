@@ -42,6 +42,7 @@ _OPTIONAL_COLLECTORS: dict[str, str] = {
     "nas": ".signals.nas",
     "credentials": ".signals.credentials",
     "sessions": ".signals.sessions",
+    "activity": ".signals.activity",
 }
 
 
@@ -284,7 +285,7 @@ class ProsocheDaemon:
         logger.info("Running weekly maintenance")
 
         # Memory consolidation
-        consolidate_bin = "/mnt/ssd/aletheia/shared/bin/consolidate-memory"
+        consolidate_bin = str(Path(os.environ.get("ALETHEIA_ROOT", str(Path.home() / ".aletheia"))) / "shared" / "bin" / "consolidate-memory")
         if os.path.exists(consolidate_bin):
             try:
                 proc = await _aio.create_subprocess_exec(
@@ -304,7 +305,7 @@ class ProsocheDaemon:
         # Agent audit via nous-health
         try:
             proc = await _aio.create_subprocess_exec(
-                "/mnt/ssd/aletheia/shared/bin/nous-health", "--json",
+                str(Path(os.environ.get("ALETHEIA_ROOT", str(Path.home() / ".aletheia"))) / "shared" / "bin" / "nous-health"), "--json",
                 stdout=_aio.subprocess.PIPE,
                 stderr=_aio.subprocess.PIPE,
             )

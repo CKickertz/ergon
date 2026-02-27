@@ -1,5 +1,17 @@
 // Zod schemas — single source of truth for config types
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { z } from "zod";
+
+export const SecretRefSchema = z.discriminatedUnion("source", [
+  z.object({ source: z.literal("env"), id: z.string() }),
+  z.object({ source: z.literal("file"), id: z.string() }),
+  z.object({ source: z.literal("vault"), id: z.string().optional() }),
+]);
+export type SecretRef = z.infer<typeof SecretRefSchema>;
+
+// Shared union for all credential fields — reused across ProviderConfig and GatewayConfig
+const CredentialField = z.union([z.string(), SecretRefSchema]);
 
 const ModelSpec = z.union([
   z.string(),
@@ -84,12 +96,19 @@ const SubagentConfig = z
   })
   .default({});
 
+const NousParams = z.object({
+  maxTokens: z.number().optional(),
+  temperature: z.number().optional(),
+  thinkingBudget: z.number().optional(),
+}).passthrough();  // forward-compat: unknown keys pass through to provider
+
 const NousDefinition = z.object({
   id: z.string(),
   default: z.boolean().default(false),
   name: z.string().optional(),
   workspace: z.string(),
   model: ModelSpec.optional(),
+  params: NousParams.optional(),
   subagents: SubagentConfig.default({}),
   tools: ToolsConfig.default({}),
   heartbeat: HeartbeatConfig.optional(),
@@ -212,9 +231,32 @@ const SignalConfig = z.preprocess(
   }),
 ).default({ enabled: true, accounts: {} });
 
+// Slack channel config (Spec 34 — Agora)
+const SlackChannelConfig = z.object({
+  enabled: z.boolean().default(false),
+  mode: z.enum(["socket", "http"]).default("socket"),
+  appToken: z.string().optional(),   // xapp-... (Socket Mode)
+  botToken: z.string().optional(),   // xoxb-... (Bot User OAuth)
+  signingSecret: z.string().optional(), // for HTTP mode verification
+  dmPolicy: z.enum(["open", "allowlist", "pairing", "disabled"]).default("open"),
+  groupPolicy: z.enum(["open", "allowlist", "disabled"]).default("allowlist"),
+  allowedChannels: z.array(z.string()).default([]),
+  allowedUsers: z.array(z.string()).default([]),
+  requireMention: z.boolean().default(true),
+  identity: z.object({
+    useAgentIdentity: z.boolean().default(true),
+  }).default({}),
+  streaming: z.boolean().default(true),
+  reactions: z.object({
+    enabled: z.boolean().default(true),
+    processingEmoji: z.string().default("hourglass_flowing_sand"),
+  }).default({}),
+});
+
 const ChannelsConfig = z
   .object({
     signal: SignalConfig,
+    slack: SlackChannelConfig.optional(),
   })
   .default({});
 
@@ -227,7 +269,7 @@ const GatewayConfig = z
     auth: z
       .object({
         mode: z.enum(["none", "token", "password", "session"]).default("token"),
-        token: z.string().optional(),
+        token: CredentialField.optional(),
         users: z
           .array(
             z.object({
@@ -337,8 +379,8 @@ const ProviderModel = z.object({
 });
 
 const ProviderConfig = z.object({
-  baseUrl: z.string(),
-  apiKey: z.string().optional(),
+  baseUrl: CredentialField,
+  apiKey: CredentialField.optional(),
   auth: z
     .enum(["api-key", "oauth", "token"])
     .default("api-key"),
@@ -487,7 +529,7 @@ const EncryptionConfig = z
 const BackupConfig = z
   .object({
     enabled: z.boolean().default(false),
-    destination: z.string().default("/mnt/ssd/aletheia/backups"),
+    destination: z.string().default(join(homedir(), ".aletheia", "backups")),
     retentionDays: z.number().int().min(1).default(30),
   })
   .default({});
@@ -551,3 +593,4 @@ export type UpdatesSettings = z.infer<typeof UpdatesConfig>;
 export type EncryptionSettings = z.infer<typeof EncryptionConfig>;
 export type BackupSettings = z.infer<typeof BackupConfig>;
 export type PlanningConfigSchema = z.infer<typeof PlanningConfig>;
+export type CredentialFieldType = z.infer<typeof CredentialField>;

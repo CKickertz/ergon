@@ -1,10 +1,15 @@
 // Main orchestration — wire all modules
 import { join } from "node:path";
 import { createLogger } from "./koina/logger.js";
+import { trySafe } from "./koina/safe.js";
 import { applyEnv, loadConfig, watchConfig } from "./taxis/loader.js";
-import { paths } from "./taxis/paths.js";
+import { loadBootstrapAnchor } from "./taxis/bootstrap-loader.js";
+import { mergeGitignore, scaffoldNousShared } from "./taxis/nous-scaffold.js";
+import { initPaths, nousSharedDir, paths } from "./taxis/paths.js";
+import { resolveSecretRefs } from "./taxis/secret-resolver.js";
 import { SessionStore } from "./mneme/store.js";
 import { createDefaultRouter, type ProviderRouter } from "./hermeneus/router.js";
+import { proactiveRefresh } from "./hermeneus/oauth-refresh.js";
 import { ToolRegistry } from "./organon/registry.js";
 import { execTool } from "./organon/built-in/exec.js";
 import { readTool } from "./organon/built-in/read.js";
@@ -49,10 +54,12 @@ import { createSelfAuthorTools, loadAuthoredTools } from "./organon/self-author.
 import { createPatchTools } from "./organon/built-in/propose-patch.js";
 import { createPipelineConfigTool } from "./organon/built-in/pipeline-config.js";
 import { createWorkspaceIndexTool } from "./organon/built-in/workspace-index.js";
+import { rebuildWorkspaceIndex, setSharedIndex } from "./organon/workspace-indexer.js";
 import { loadCustomCommands, registerCustomCommands } from "./organon/custom-commands.js";
 import { NousManager } from "./nous/manager.js";
 import { DianoiaOrchestrator } from "./dianoia/orchestrator.js";
 import { FileSyncDaemon } from "./dianoia/file-sync.js";
+import { openPlansDb } from "./dianoia/plans-db.js";
 import { CheckpointSystem, createPlanCreateTool, createPlanDiscussTool, createPlanExecuteTool, createPlanRequirementsTool, createPlanResearchTool, createPlanRoadmapTool, createPlanVerifyTool, ExecutionOrchestrator, GoalBackwardVerifier, PlanningStore, RequirementsOrchestrator, ResearchOrchestrator, RoadmapOrchestrator } from "./dianoia/index.js";
 import { McpClientManager } from "./organon/mcp-client.js";
 import { createGateway, type GatewayAuthDeps, setCommandsRef, setCronRef, setMcpRef, setSkillsRef, setWatchdogRef, startGateway } from "./pylon/server.js";
@@ -61,15 +68,10 @@ import { AuditLog } from "./symbolon/audit.js";
 import { generateSecret } from "./symbolon/tokens.js";
 import { createMcpRoutes } from "./pylon/mcp.js";
 import { broadcastEvent, createUiRoutes } from "./pylon/ui.js";
-import { SignalClient } from "./semeion/client.js";
-import {
-  type DaemonHandle,
-  daemonOptsFromConfig,
-  spawnDaemon,
-  waitForReady,
-} from "./semeion/daemon.js";
-import { startListener } from "./semeion/listener.js";
-import { initSenderPii, parseTarget, sendMessage } from "./semeion/sender.js";
+import { AgoraRegistry } from "./agora/registry.js";
+import { SignalChannelProvider } from "./semeion/provider.js";
+import { SlackChannelProvider } from "./agora/channels/slack/provider.js";
+import { sendMessage } from "./semeion/sender.js";
 import { createDefaultRegistry } from "./semeion/commands.js";
 import { SkillRegistry } from "./organon/skills.js";
 import { discoverPlugins, loadPlugins } from "./prostheke/loader.js";
@@ -77,6 +79,7 @@ import { PluginRegistry } from "./prostheke/registry.js";
 import { CronScheduler } from "./daemon/cron.js";
 import { runNightlyReflection, runWeeklyReflection } from "./daemon/reflection-cron.js";
 import { runEvolutionCycle } from "./daemon/evolution-cron.js";
+import { runGraphMaintenance } from "./daemon/graph-maintenance-cron.js";
 import { runRetention } from "./daemon/retention.js";
 import { type ServiceProbe, Watchdog } from "./daemon/watchdog.js";
 import { startUpdateChecker } from "./daemon/update-check.js";
@@ -84,9 +87,8 @@ import { getVersion } from "./version.js";
 import { CompetenceModel } from "./nous/competence.js";
 import { UncertaintyTracker } from "./nous/uncertainty.js";
 import type { AletheiaConfig } from "./taxis/schema.js";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, type FSWatcher, unlinkSync, watch, writeFileSync } from "node:fs";
 import { getKeySalt, initEncryption } from "./koina/encryption.js";
-import Database from "better-sqlite3";
 import { eventBus } from "./koina/event-bus.js";
 import { type HookRegistry, registerHooks } from "./koina/hooks.js";
 import { getSidecarUrl, getUserId } from "./koina/memory-client.js";
@@ -120,12 +122,46 @@ export interface AletheiaRuntime {
 }
 
 export function createRuntime(configPath?: string): AletheiaRuntime {
+  const { anchor } = loadBootstrapAnchor();
+  initPaths(anchor);
+
+  // Best-effort gap-fill — non-blocking, warns on newly created dirs
+  trySafe("nous:scaffold", () => {
+    const nousDir = nousSharedDir(); // called inside callback — MUST be after initPaths()
+    const created = scaffoldNousShared(nousDir);
+    if (created.length > 0) {
+      log.warn("nous scaffold dirs created at startup (run 'aletheia init' for authoritative setup)", { created });
+    }
+    mergeGitignore(nousDir); // idempotent — safe every startup
+  }, undefined);
+
+  // INDX-01/INDX-05: Wire _shared/ as default indexed path — background build at startup
+  trySafe("workspace-index:startup", () => {
+    const nousDir = nousSharedDir(); // called inside callback — requires initPaths() to have run
+    const sharedDir = join(nousDir, "_shared");
+    if (existsSync(sharedDir)) {
+      void (async () => {
+        try {
+          const index = await rebuildWorkspaceIndex(sharedDir);
+          setSharedIndex(index);
+          log.debug("Workspace index background build complete", { fileCount: index.files.length });
+        } catch (error: unknown) {
+          log.warn("Workspace index startup build failed", { err: error instanceof Error ? error.message : error });
+        }
+      })();
+    }
+  }, undefined);
+
+  const plansDb = openPlansDb(paths.sessionsDb());
+  log.info("Plans DB opened", { path: plansDb.name });
+
   eventBus.emit("boot:start", {});
   log.info("Initializing Aletheia runtime");
 
   const config = loadConfig(configPath);
 
   applyEnv(config);
+  resolveSecretRefs(config); // must run after applyEnv — env vars from config.env.vars must be set first
 
   // Initialize encryption before store (store uses encryptIfEnabled/decryptIfNeeded)
   if (config.encryption.enabled) {
@@ -135,9 +171,9 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
     } else {
       const saltPath = join(paths.configDir(), "encryption.salt");
       let salt: string | undefined;
-      if (existsSync(saltPath)) {
+      try {
         salt = readFileSync(saltPath, "utf-8").trim();
-      }
+      } catch { /* salt file doesn't exist yet */ }
       initEncryption(passphrase, salt);
       if (!salt) {
         writeFileSync(saltPath, getKeySalt()!, { mode: 0o600 });
@@ -161,6 +197,13 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
       }
     }
   }
+
+  // Proactive OAuth refresh — check token expiry on startup, refresh if needed.
+  // Fire-and-forget: runs async while the rest of startup continues.
+  // If refresh succeeds, the credential file is updated before the first API call.
+  proactiveRefresh().catch((err) =>
+    log.warn(`Proactive OAuth refresh failed (non-fatal): ${err instanceof Error ? err.message : err}`),
+  );
 
   const router = createDefaultRouter(config.models);
 
@@ -273,14 +316,13 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
     verifier: true,
     mode: "interactive" as const,
   };
-  const planningStore = new PlanningStore(store.getDb());
-  const planningOrchestrator = new DianoiaOrchestrator(store.getDb(), planningConfig);
-  planningOrchestrator.setWorkspaceRoot(defaultWorkspace);
+  const planningStore = new PlanningStore(plansDb);
+  const planningOrchestrator = new DianoiaOrchestrator(plansDb, planningConfig);
   manager.setPlanningOrchestrator(planningOrchestrator);
 
   // File sync daemon — writes markdown files alongside every DB mutation (co-primary)
-  const fileSyncDaemon = new FileSyncDaemon(store.getDb());
-  fileSyncDaemon.start(defaultWorkspace);
+  const fileSyncDaemon = new FileSyncDaemon(plansDb);
+  fileSyncDaemon.start();
 
   log.info("Dianoia planning orchestrator initialized", { workspace: defaultWorkspace });
 
@@ -395,31 +437,28 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
   tools.register(planCreateTool);
 
   // Planning research orchestrator — wired after dispatchTool is available
-  const researchOrchestrator = new ResearchOrchestrator(store.getDb(), dispatchTool, defaultWorkspace);
+  const researchOrchestrator = new ResearchOrchestrator(plansDb, dispatchTool, defaultWorkspace);
   const planResearchTool = createPlanResearchTool(planningOrchestrator, researchOrchestrator);
   tools.register(planResearchTool);
 
   // Planning requirements orchestrator — wired after research orchestrator
-  const requirementsOrchestrator = new RequirementsOrchestrator(store.getDb(), defaultWorkspace);
+  const requirementsOrchestrator = new RequirementsOrchestrator(plansDb, defaultWorkspace);
   const planRequirementsTool = createPlanRequirementsTool(planningOrchestrator, requirementsOrchestrator);
   tools.register(planRequirementsTool);
 
   // Planning roadmap orchestrator — wired after dispatchTool is available
-  const roadmapOrchestrator = new RoadmapOrchestrator(store.getDb(), dispatchTool);
-  roadmapOrchestrator.setWorkspaceRoot(defaultWorkspace);
+  const roadmapOrchestrator = new RoadmapOrchestrator(plansDb, dispatchTool);
   const planRoadmapTool = createPlanRoadmapTool(planningOrchestrator, roadmapOrchestrator);
   tools.register(planRoadmapTool);
 
   // Planning discussion tool — bridges 'discussing' state between roadmap and phase-planning
-  const planDiscussTool = createPlanDiscussTool(planningOrchestrator, store.getDb(), dispatchTool);
+  const planDiscussTool = createPlanDiscussTool(planningOrchestrator, plansDb, dispatchTool);
   tools.register(planDiscussTool);
 
   // Planning execution orchestrator — wired after dispatchTool is available
-  const executionOrchestrator = new ExecutionOrchestrator(store.getDb(), dispatchTool);
-  executionOrchestrator.setWorkspaceRoot(defaultWorkspace);
+  const executionOrchestrator = new ExecutionOrchestrator(plansDb, dispatchTool);
   // Planning verifier — must be created before execution tool so it can be injected
-  const verifierOrchestrator = new GoalBackwardVerifier(store.getDb(), dispatchTool);
-  verifierOrchestrator.setWorkspaceRoot(defaultWorkspace);
+  const verifierOrchestrator = new GoalBackwardVerifier(plansDb, dispatchTool);
 
   const planExecuteTool = createPlanExecuteTool(planningOrchestrator, executionOrchestrator, verifierOrchestrator);
   tools.register(planExecuteTool);
@@ -444,11 +483,14 @@ export function createRuntime(configPath?: string): AletheiaRuntime {
     memoryTarget,
     shutdown: () => {
       fileSyncDaemon.stop();
+      plansDb.close();
       store.close();
       log.info("Runtime shutdown complete");
     },
   };
 }
+
+let _sharedIndexWatcher: FSWatcher | null = null;
 
 export async function startRuntime(configPath?: string): Promise<void> {
   const runtime = createRuntime(configPath);
@@ -502,9 +544,9 @@ export async function startRuntime(configPath?: string): Promise<void> {
   // --- Auth ---
   let gatewayAuth: GatewayAuthDeps | undefined;
   {
-    const authDb = new Database(paths.sessionsDb());
-    authDb.pragma("journal_mode = WAL");
-    authDb.pragma("synchronous = NORMAL");
+    // Reuse the SessionStore's database connection — both operate on disjoint
+    // tables in sessions.db, so sharing avoids a redundant WAL reader (#346).
+    const authDb = runtime.store.getDb();
 
     const auditLog = new AuditLog(authDb);
     let authSessionStore: AuthSessionStore | null = null;
@@ -586,6 +628,35 @@ export async function startRuntime(configPath?: string): Promise<void> {
   eventBus.emit("boot:ready", { port, tools: runtime.tools.size, plugins: runtime.plugins.size });
   log.info(`Aletheia gateway listening on port ${port}`);
 
+  // INDX-01: Live file watcher — rebuilds shared index when _shared/ files change
+  {
+    let sharedDir: string | null = null;
+    try {
+      sharedDir = join(nousSharedDir(), "_shared");
+    } catch { /* anchor not set — skip watcher */ }
+
+    if (sharedDir && existsSync(sharedDir)) {
+      let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+      const capturedSharedDir = sharedDir;
+      _sharedIndexWatcher = watch(capturedSharedDir, { recursive: true }, (_event, filename) => {
+        if (!filename || filename.includes(".aletheia-index")) return; // avoid recursive trigger on index writes
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          void (async () => {
+            try {
+              const index = await rebuildWorkspaceIndex(capturedSharedDir);
+              setSharedIndex(index);
+              log.debug("Workspace index rebuilt after file change", { filename });
+            } catch (error: unknown) {
+              log.warn("Workspace index rebuild after file change failed", { err: error instanceof Error ? error.message : error });
+            }
+          })();
+        }, 300); // 300ms debounce — avoids burst rebuilds on bulk saves (inotify on Linux)
+      });
+      log.debug("Workspace index file watcher started", { dir: capturedSharedDir });
+    }
+  }
+
   // --- Skills ---
   const skills = new SkillRegistry();
   skills.loadFromDirectory(join(paths.shared, "skills"));
@@ -618,119 +689,93 @@ export async function startRuntime(configPath?: string): Promise<void> {
   }
   setCommandsRef(commandRegistry);
 
-  // /plan and !plan — route to DianoiaOrchestrator.handle()
+  // /plan and !plan — route to DianoiaOrchestrator with slug intake routing
   const planOrch = runtime.manager.getPlanningOrchestrator();
   if (planOrch) {
     commandRegistry.register({
       name: "plan",
       description: "Start or resume a Dianoia planning project",
-      execute(_args, ctx) {
+      execute(args, ctx) {
         const session = ctx.sessionId ? ctx.store.findSessionById(ctx.sessionId) : undefined;
         const nousId = session?.nousId ?? ctx.config.agents.list[0]?.id ?? "syn";
         const sessionId = ctx.sessionId ?? "";
+        const userInput = args.trim();
+        // Routing note: DianoiaOrchestrator intake state is checked here in the /plan command
+        // handler, not in nous/manager.ts. The /plan command is the exclusive entry point to
+        // planOrch — no pipeline stage or tool invokes planOrch.handle() directly — so the
+        // consumer boundary (here) is the correct and complete routing location.
+        // Migration response routing — highest priority (before slug intake)
+        if (planOrch.hasPendingMigration()) {
+          return Promise.resolve(planOrch.handleMigrationResponse(userInput, nousId, sessionId));
+        }
+        // Route to slug confirmation if confirmation is pending
+        if (planOrch.hasPendingSlugConfirmation()) {
+          return Promise.resolve(planOrch.receiveSlugConfirmation(userInput, nousId, sessionId));
+        }
+        // Route to name intake if we're waiting for a project name
+        if (planOrch.hasPendingNameIntake()) {
+          return Promise.resolve(planOrch.receiveProjectName(userInput, nousId, sessionId));
+        }
+        // Default: start or resume flow
         return Promise.resolve(planOrch.handle(nousId, sessionId));
       },
     });
     log.debug("Registered /plan command");
   }
 
-  // --- Signal ---
+  // --- Channels (Agora) ---
   let watchdog: Watchdog | null = null;
   const abortController = new AbortController();
-  const daemons: DaemonHandle[] = [];
-  const clients = new Map<string, SignalClient>();
+  const agora = new AgoraRegistry();
 
-  // Collect bound group IDs from bindings so the listener can allow them
-  const boundGroupIds = new Set<string>();
-  for (const binding of config.bindings) {
-    if (binding.match.peer?.kind === "group" && binding.match.peer.id) {
-      boundGroupIds.add(binding.match.peer.id);
-    }
+  // Signal channel provider
+  const signalProvider = new SignalChannelProvider({
+    config,
+    commands: commandRegistry,
+    skills,
+    onStatusRequest: async (client, target) => {
+      const status = formatStatusMessage(runtime.store, config, watchdog);
+      await sendMessage(client, target, status, { markdown: false });
+    },
+  });
+  agora.register(signalProvider);
+
+  // Slack channel provider (if configured)
+  if (config.channels.slack?.enabled) {
+    const slackProvider = new SlackChannelProvider(config);
+    agora.register(slackProvider);
   }
 
-  initSenderPii(config.privacy?.pii);
+  // Start all registered channels
+  await agora.startAll({
+    dispatch: (msg) => runtime.manager.handleMessage(msg),
+    config,
+    store: runtime.store,
+    manager: runtime.manager,
+    abortSignal: abortController.signal,
+    commands: commandRegistry,
+    get watchdog() { return watchdog; },
+  });
 
-  if (config.channels.signal.enabled) {
-    for (const [accountId, account] of Object.entries(
-      config.channels.signal.accounts,
-    )) {
-      if (!account.enabled) continue;
-
-      const httpUrl =
-        account.httpUrl ??
-        `http://${account.httpHost}:${account.httpPort}`;
-
-      if (account.autoStart) {
-        const daemonOpts = daemonOptsFromConfig(accountId, account);
-        const handle = spawnDaemon(daemonOpts);
-        daemons.push(handle);
-
-        try {
-          await waitForReady(handle.baseUrl);
-        } catch (error) {
-          log.error(
-            `Signal daemon for ${accountId} failed to start: ${error instanceof Error ? error.message : error}`,
-          );
-          continue;
-        }
-      }
-
-      const client = new SignalClient(httpUrl);
-      clients.set(accountId, client);
-
-      startListener({
-        accountId,
-        account,
-        manager: runtime.manager,
-        client,
-        baseUrl: httpUrl,
-        abortSignal: abortController.signal,
-        boundGroupIds,
-        commands: commandRegistry,
-        store: runtime.store,
-        config,
-        get watchdog() { return watchdog; },
-        skills,
-        onStatusRequest: async (target) => {
-          const status = formatStatusMessage(runtime.store, config, watchdog);
-          await sendMessage(client, target, status, { markdown: false });
-        },
-      });
-
-      log.info(`Signal account ${accountId} active at ${httpUrl}`);
-    }
-
-    if (clients.size > 0) {
-      const firstClient = clients.values().next().value!;
-      const firstAccountId = clients.keys().next().value!;
-      const firstAccount =
-        config.channels.signal.accounts[firstAccountId];
-      const defaultAccount = firstAccount?.account ?? firstAccountId;
-
-      const messageTool = createMessageTool({
-        sender: {
-          send: async (to: string, text: string) => {
-            const target = parseTarget(to, defaultAccount);
-            await sendMessage(firstClient, target, text);
-          },
-        },
-      });
-      runtime.tools.register(messageTool);
-      log.info("Message tool registered with Signal sender");
-
-      const voiceTool = createVoiceReplyTool({
-        send: async (to: string, text: string, attachments: string[]) => {
-          const target = parseTarget(to, defaultAccount);
-          await sendMessage(firstClient, target, text, { attachments });
-        },
-      });
-      runtime.tools.register(voiceTool);
-      log.info("Voice reply tool registered");
-    } else {
-      runtime.tools.register(createMessageTool());
-    }
+  // Wire message tool to agora registry for multi-channel routing (Spec 34, Phase 4)
+  if (agora.size > 0) {
+    const messageTool = createMessageTool({ registry: agora });
+    runtime.tools.register(messageTool);
+    log.info(`Message tool registered via agora (channels: ${agora.list().join(", ")})`);
   } else {
     runtime.tools.register(createMessageTool());
+    log.warn("Message tool registered without channels — sends will fail");
+  }
+
+  // Voice reply tool — Signal-only (requires TTS + audio file delivery)
+  if (signalProvider.hasClients) {
+    const voiceTool = createVoiceReplyTool({
+      send: async (to: string, text: string, attachments: string[]) => {
+        await agora.send("signal", { to, text, attachments });
+      },
+    });
+    runtime.tools.register(voiceTool);
+    log.info("Voice reply tool registered (Signal only)");
   }
 
   // --- Cron ---
@@ -769,10 +814,9 @@ export async function startRuntime(configPath?: string): Promise<void> {
 
   // Backup cron command — exports all agents to JSON files with retention
   cron.registerCommand("backup:all-agents", async () => {
-    const { mkdirSync: mkdirBackup, readdirSync: readdirBackup, unlinkSync: unlinkBackup } = await import("node:fs");
     const { exportAgent, agentFileToJson } = await import("./portability/export.js");
     const dest = config.backup.destination;
-    mkdirBackup(dest, { recursive: true });
+    mkdirSync(dest, { recursive: true });
 
     const date = new Date().toISOString().split("T")[0];
     let count = 0;
@@ -781,9 +825,7 @@ export async function startRuntime(configPath?: string): Promise<void> {
       try {
         const agentFile = await exportAgent(agent.id, agent as unknown as Record<string, unknown>, runtime.store);
         const filename = `${agent.id}-${date}.agent.json`;
-        const { writeFileSync: writeBackup } = await import("node:fs");
-        const { join: joinPath } = await import("node:path");
-        writeBackup(joinPath(dest, filename), agentFileToJson(agentFile, false));
+        writeFileSync(join(dest, filename), agentFileToJson(agentFile, false));
         count++;
       } catch (error) {
         log.warn(`Backup failed for ${agent.id}: ${error instanceof Error ? error.message : error}`);
@@ -793,14 +835,12 @@ export async function startRuntime(configPath?: string): Promise<void> {
     // Retention — delete old .agent.json files
     const cutoff = Date.now() - config.backup.retentionDays * 24 * 60 * 60 * 1000;
     try {
-      const { statSync: statBackup } = await import("node:fs");
-      const { join: joinPath } = await import("node:path");
-      for (const file of readdirBackup(dest)) {
+      for (const file of readdirSync(dest)) {
         if (!file.endsWith(".agent.json")) continue;
-        const filePath = joinPath(dest, file);
-        const stat = statBackup(filePath);
+        const filePath = join(dest, file);
+        const stat = statSync(filePath);
         if (stat.mtimeMs < cutoff) {
-          unlinkBackup(filePath);
+          unlinkSync(filePath);
           log.debug(`Deleted old backup: ${file}`);
         }
       }
@@ -812,18 +852,29 @@ export async function startRuntime(configPath?: string): Promise<void> {
   // Evolutionary config search — mutate pipeline configs, benchmark, promote winners
   cron.registerCommand("evolution:nightly", async () => {
     const opts: Parameters<typeof runEvolutionCycle>[3] = {};
-    if (clients.size > 0 && config.watchdog?.alertRecipient) {
+    if (signalProvider.hasClients && config.watchdog?.alertRecipient) {
       const alertRecipient = config.watchdog.alertRecipient;
-      const client = clients.values().next().value!;
-      const accountId = clients.keys().next().value!;
-      const account = config.channels.signal.accounts[accountId]!;
-      const accountPhone = account.account ?? accountId;
       opts.sendNotification = async (_nousId, message) => {
-        await sendMessage(client, { account: accountPhone, recipient: alertRecipient }, message, { markdown: false });
+        await agora.send("signal", { to: alertRecipient, text: message, markdown: false });
       };
     }
     const result = await runEvolutionCycle(runtime.store, runtime.router, config, opts);
     return `Evolution: ${result.agentsProcessed} agents, ${result.variantsCreated} variants, ${result.promotions} promotions`;
+  });
+
+  // Graph and vector store maintenance — monthly cleanup of Neo4j drift, Qdrant duplicates, orphans
+  cron.registerCommand("graph:maintenance", async () => {
+    const result = await runGraphMaintenance({
+      neo4jPassword: process.env["NEO4J_PASSWORD"],
+    });
+    return (
+      `Graph maintenance: ${result.graphSanity.nodes} nodes, ` +
+      `${result.graphSanity.violations.length} violations, ` +
+      `${result.dedup.removed} deduped, ` +
+      `${result.orphans.removed} orphans purged ` +
+      `(${(result.durationMs / 1000).toFixed(1)}s)` +
+      (result.errors.length > 0 ? ` [${result.errors.length} errors]` : "")
+    );
   });
 
   if (config.cron.enabled) {
@@ -846,16 +897,9 @@ export async function startRuntime(configPath?: string): Promise<void> {
 
     // Wire alert function only when Signal + alertRecipient are configured
     let alertFn: ((message: string) => Promise<void>) | undefined;
-    if (wdConfig.alertRecipient && clients.size > 0) {
-      const alertClient = clients.values().next().value!;
-      const alertAccountId = clients.keys().next().value!;
-      const alertAccount = config.channels.signal.accounts[alertAccountId]!;
-      const alertAccountPhone = alertAccount.account ?? alertAccountId;
+    if (wdConfig.alertRecipient && signalProvider.hasClients) {
       alertFn = async (message) => {
-        await sendMessage(alertClient, {
-          account: alertAccountPhone,
-          recipient: wdConfig.alertRecipient!,
-        }, message, { markdown: false });
+        await agora.send("signal", { to: wdConfig.alertRecipient!, text: message, markdown: false });
       };
     }
 
@@ -863,7 +907,7 @@ export async function startRuntime(configPath?: string): Promise<void> {
     watchdog.start();
     setWatchdogRef(watchdog);
     runtime.manager.setWatchdog(watchdog);
-    log.info(`Watchdog started: ${services.length} services${alertFn ? ", alerts → Signal" : ", no alert channel"}`);
+    log.info(`Watchdog started: ${services.length} services${alertFn ? ", alerts via agora" : ", no alert channel"}`);
   }
 
   // Spawn session cleanup — archive stale spawn sessions every hour
@@ -887,6 +931,8 @@ export async function startRuntime(configPath?: string): Promise<void> {
 
   // --- Config hot-reload ---
   const configWatcher = watchConfig(configPath, (newConfig) => {
+    applyEnv(newConfig);
+    resolveSecretRefs(newConfig); // resolve refs on hot-reload too
     const diff = runtime.manager.reloadConfig(newConfig);
 
     // Rebuild routing cache with new bindings
@@ -909,6 +955,7 @@ export async function startRuntime(configPath?: string): Promise<void> {
     clearInterval(retentionTimer);
     clearInterval(updateCheckTimer);
     configWatcher?.close();
+    _sharedIndexWatcher?.close();
     watchdog?.stop();
     cron.stop();
 
@@ -923,9 +970,7 @@ export async function startRuntime(configPath?: string): Promise<void> {
 
     if (mcpManager) await mcpManager.disconnectAll().catch(() => { /* disconnect errors suppressed on shutdown */ });
     abortController.abort();
-    for (const daemon of daemons) {
-      daemon.stop();
-    }
+    await agora.stopAll().catch(() => { /* channel stop errors suppressed on shutdown */ });
     await closeBrowser().catch(() => { /* browser close errors suppressed on shutdown */ });
     await runtime.plugins.dispatchShutdown();
     hookRegistry.teardown();

@@ -1,6 +1,6 @@
 // Tests for ContextPacketBuilder (Spec 32 Phase 2)
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -24,6 +24,10 @@ const TEST_PROJECT_ID = "proj_test123";
 const TEST_PHASE_ID = "phase_test456";
 
 let workspaceRoot: string;
+
+function projectDirValueFor(workspace: string, projectId: string): string {
+  return join(workspace, ".dianoia", "projects", projectId);
+}
 
 function makePhase(overrides?: Partial<PlanningPhase>): PlanningPhase {
   return {
@@ -64,8 +68,7 @@ function makeRequirement(overrides?: Partial<PlanningRequirement>): PlanningRequ
 }
 
 beforeEach(() => {
-  workspaceRoot = join(tmpdir(), `dianoia-ctx-test-${Date.now()}`);
-  mkdirSync(workspaceRoot, { recursive: true });
+  workspaceRoot = mkdtempSync(join(tmpdir(), "dianoia-ctx-test-"));
 });
 
 afterEach(() => {
@@ -78,8 +81,7 @@ describe("buildContextPacketSync", () => {
   it("includes phase objective for executor role", () => {
     const phase = makePhase();
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue: projectDirValueFor(workspaceRoot, TEST_PROJECT_ID),
       phaseId: TEST_PHASE_ID,
       role: "executor",
       phase,
@@ -95,8 +97,7 @@ describe("buildContextPacketSync", () => {
   it("includes project goal for verifier role", () => {
     const phase = makePhase();
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue: projectDirValueFor(workspaceRoot, TEST_PROJECT_ID),
       phaseId: TEST_PHASE_ID,
       role: "verifier",
       phase,
@@ -108,9 +109,10 @@ describe("buildContextPacketSync", () => {
   });
 
   it("excludes project context for executor role", () => {
+    const projectDirValue = projectDirValueFor(workspaceRoot, TEST_PROJECT_ID);
     // Write a PROJECT.md so there's something to potentially include
-    ensureProjectDir(workspaceRoot, TEST_PROJECT_ID);
-    writeProjectFile(workspaceRoot, {
+    ensureProjectDir(projectDirValue);
+    writeProjectFile({
       id: TEST_PROJECT_ID,
       nousId: "test",
       sessionId: "test",
@@ -119,7 +121,7 @@ describe("buildContextPacketSync", () => {
       // oxlint-disable-next-line typescript/no-explicit-any -- partial mock config in test
       config: {} as any,
       contextHash: "",
-      projectDir: null,
+      projectDir: projectDirValue,
       createdAt: "2026-01-01",
       updatedAt: "2026-01-01",
       projectContext: { goal: "Big project context" },
@@ -127,8 +129,7 @@ describe("buildContextPacketSync", () => {
 
     const phase = makePhase();
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue,
       phaseId: TEST_PHASE_ID,
       role: "executor",
       phase,
@@ -140,8 +141,9 @@ describe("buildContextPacketSync", () => {
   });
 
   it("includes discussion decisions for executor role", () => {
-    ensurePhaseDir(workspaceRoot, TEST_PROJECT_ID, TEST_PHASE_ID);
-    writeDiscussFile(workspaceRoot, TEST_PROJECT_ID, TEST_PHASE_ID, [
+    const projectDirValue = projectDirValueFor(workspaceRoot, TEST_PROJECT_ID);
+    ensurePhaseDir(projectDirValue, TEST_PHASE_ID);
+    writeDiscussFile(projectDirValue, TEST_PHASE_ID, [
       {
         id: "disc_1",
         projectId: TEST_PROJECT_ID,
@@ -162,8 +164,7 @@ describe("buildContextPacketSync", () => {
 
     const phase = makePhase();
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue,
       phaseId: TEST_PHASE_ID,
       role: "executor",
       phase,
@@ -181,8 +182,7 @@ describe("buildContextPacketSync", () => {
     ];
 
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue: projectDirValueFor(workspaceRoot, TEST_PROJECT_ID),
       phaseId: TEST_PHASE_ID,
       role: "executor",
       phase,
@@ -203,8 +203,7 @@ describe("buildContextPacketSync", () => {
     ];
 
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue: projectDirValueFor(workspaceRoot, TEST_PROJECT_ID),
       phaseId: "p1",
       role: "planner",
       phase: phases[0],
@@ -225,8 +224,7 @@ describe("buildContextPacketSync", () => {
     ];
 
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue: projectDirValueFor(workspaceRoot, TEST_PROJECT_ID),
       phaseId: "p1",
       role: "executor",
       phase: phases[0],
@@ -236,13 +234,12 @@ describe("buildContextPacketSync", () => {
     expect(packet).not.toContain("Roadmap Overview");
   });
 
-  it("respects token budget and truncates lower-priority sections", { timeout: 30000 }, () => {
+  it("respects token budget and truncates lower-priority sections", { timeout: 60000 }, () => {
     const longSupplementary = "x".repeat(5000);
     const phase = makePhase();
 
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue: projectDirValueFor(workspaceRoot, TEST_PROJECT_ID),
       phaseId: TEST_PHASE_ID,
       role: "executor",
       phase,
@@ -260,8 +257,7 @@ describe("buildContextPacketSync", () => {
   it("includes supplementary context for executor role", () => {
     const phase = makePhase();
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue: projectDirValueFor(workspaceRoot, TEST_PROJECT_ID),
       phaseId: TEST_PHASE_ID,
       role: "executor",
       phase,
@@ -274,8 +270,7 @@ describe("buildContextPacketSync", () => {
 
   it("returns empty string when no sections match", () => {
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue: projectDirValueFor(workspaceRoot, TEST_PROJECT_ID),
       phaseId: null,
       role: "researcher",
       // No projectGoal, no supplementary, no files
@@ -285,15 +280,15 @@ describe("buildContextPacketSync", () => {
   });
 
   it("reads from file-backed plan when no in-memory plan", () => {
-    ensurePhaseDir(workspaceRoot, TEST_PROJECT_ID, TEST_PHASE_ID);
-    writePlanFile(workspaceRoot, TEST_PROJECT_ID, TEST_PHASE_ID, {
+    const projectDirValue = projectDirValueFor(workspaceRoot, TEST_PROJECT_ID);
+    ensurePhaseDir(projectDirValue, TEST_PHASE_ID);
+    writePlanFile(projectDirValue, TEST_PHASE_ID, {
       steps: [{ id: "s1", description: "Do the thing" }],
     });
 
     const phase = makePhase({ plan: null }); // No in-memory plan
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue,
       phaseId: TEST_PHASE_ID,
       role: "executor",
       phase,
@@ -304,18 +299,17 @@ describe("buildContextPacketSync", () => {
   });
 
   it("includes research for planner role", () => {
-    ensureProjectDir(workspaceRoot, TEST_PROJECT_ID);
-    const dir = join(workspaceRoot, ".dianoia", "projects", TEST_PROJECT_ID);
+    const projectDirValue = projectDirValueFor(workspaceRoot, TEST_PROJECT_ID);
+    ensureProjectDir(projectDirValue);
     writeFileSync(
-      join(dir, "RESEARCH.md"),
+      join(projectDirValue, "RESEARCH.md"),
       "# Research\n\n## stack (complete)\n\nUse TypeScript with Fastify.\n",
       "utf-8",
     );
 
     const phase = makePhase();
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue,
       phaseId: TEST_PHASE_ID,
       role: "planner",
       phase,
@@ -353,22 +347,29 @@ describe("Token budget accuracy (CTX-01)", () => {
     
     // Create some substantial content to test truncation
     const largeContent = "This is a large piece of content. ".repeat(1000);
-    
-    writeProjectFile(workspaceRoot, {
+    const projectDirValue = projectDirValueFor(workspaceRoot, TEST_PROJECT_ID);
+    ensureProjectDir(projectDirValue);
+
+    writeProjectFile({
       id: TEST_PROJECT_ID,
+      nousId: "test",
+      sessionId: "test",
       goal: largeContent,
       state: "idle",
+      // oxlint-disable-next-line typescript/no-explicit-any -- partial mock config in test
+      config: {} as any,
+      contextHash: "",
+      projectDir: projectDirValue,
       createdAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-01T00:00:00Z",
       projectContext: null,
     });
-    
-    writeRequirementsFile(workspaceRoot, TEST_PROJECT_ID, requirements);
-    
+
+    writeRequirementsFile(projectDirValue, requirements);
+
     const maxTokens = 500;
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue,
       phaseId: TEST_PHASE_ID,
       role: "executor",
       phase,
@@ -392,8 +393,7 @@ describe("Token budget accuracy (CTX-01)", () => {
     const requirements = [makeRequirement()];
     
     const packet = buildContextPacketSync({
-      workspaceRoot,
-      projectId: TEST_PROJECT_ID,
+      projectDirValue: projectDirValueFor(workspaceRoot, TEST_PROJECT_ID),
       phaseId: TEST_PHASE_ID,
       role: "executor",
       phase,

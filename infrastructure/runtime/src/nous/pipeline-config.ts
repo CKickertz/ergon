@@ -1,5 +1,5 @@
 // Per-agent pipeline configuration — recall, tool expiry, note budget
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { createLogger } from "../koina/logger.js";
@@ -16,6 +16,8 @@ export const RecallConfigSchema = z.object({
   // Run `npm run test:tune-sufficiency` to determine optimal values from corpus data.
   sufficiencyThreshold: z.number().min(0).max(1).default(0.85),
   sufficiencyMinHits: z.number().int().min(1).max(20).default(3),
+  /** Temporal decay half-life in days. Memory at this age scores 50% of raw similarity. */
+  halfLifeDays: z.number().min(1).max(365).default(30),
 }).default({});
 
 export const ToolsConfigSchema = z.object({
@@ -53,8 +55,6 @@ const cache = new Map<string, CacheEntry>();
 export function loadPipelineConfig(workspace: string): PipelineConfig {
   const filePath = join(workspace, "pipeline.json");
 
-  if (!existsSync(filePath)) return DEFAULTS;
-
   try {
     const stat = statSync(filePath);
     const cached = cache.get(filePath);
@@ -66,6 +66,9 @@ export function loadPipelineConfig(workspace: string): PipelineConfig {
     cache.set(filePath, { config: result, mtimeMs: stat.mtimeMs });
     return result;
   } catch (error) {
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return DEFAULTS;
+    }
     log.warn(`Invalid pipeline.json in ${workspace}: ${error instanceof Error ? error.message : error}`);
     return DEFAULTS;
   }

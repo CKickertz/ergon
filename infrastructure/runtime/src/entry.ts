@@ -5,7 +5,7 @@ import { Command } from "commander";
 import { startRuntime } from "./aletheia.js";
 import { createLogger } from "./koina/logger.js";
 import { getVersion } from "./version.js";
-import { applyFixes, formatResults, runDiagnostics } from "./koina/diagnostics.js";
+import { formatDoctorOutput, formatResults, runBootPersistenceChecks, runConnectivityChecks, runDependencyChecks, runDiagnostics } from "./koina/diagnostics.js";
 import { readJson } from "./koina/fs.js";
 
 const log = createLogger("entry");
@@ -35,9 +35,8 @@ program
   .command("init")
   .description("First-run setup wizard — configure credentials, create first agent")
   .action(async () => {
-    const { existsSync, mkdirSync, writeFileSync } = await import("node:fs");
-    const { join, dirname } = await import("node:path");
-    const { fileURLToPath } = await import("node:url");
+    const { existsSync, mkdirSync, readFileSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
     const { randomBytes } = await import("node:crypto");
     const { paths } = await import("./taxis/paths.js");
     const { writeJson } = await import("./koina/fs.js");
@@ -51,45 +50,127 @@ program
     try {
       const configPath = paths.configFile();
 
+      let profileOnlyMode = false;
       if (existsSync(configPath)) {
-        const answer = await ask(`Config exists at ${configPath}. Overwrite? (y/N) `);
-        if (answer.trim().toLowerCase() !== "y") {
+        console.log(`\nConfig exists at ${configPath}.`);
+        const answer = (await ask("  [A]ll fields, [P]rofile only, [C]ancel? ")).trim().toLowerCase();
+        if (answer === "c" || answer === "") {
           console.log("Aborted.");
           return;
         }
+        if (answer === "p") {
+          profileOnlyMode = true;
+        }
+        // "a" or anything else = full re-run (fall through)
       }
 
-      // API key
-      const apiKey = (await ask("Anthropic API key (sk-ant-...): ")).trim();
-      if (!apiKey) {
-        console.error("API key is required.");
-        return;
-      }
+      let apiKey = "";
+      let port = 18789;
+      let authMode: "none" | "token" | "session" = "none";
+      let authBlock: Record<string, unknown> = { mode: "none" };
+      let nousDir = "";
+      let deployDir = "";
 
-      // Gateway port
-      const portStr = (await ask("Gateway port [18789]: ")).trim();
-      const port = portStr ? parseInt(portStr, 10) : 18789;
-      if (isNaN(port) || port < 1 || port > 65535) {
-        console.error("Invalid port number.");
-        return;
-      }
+      if (!profileOnlyMode) {
+        // API key — auto-detect from ~/.claude.json (same source as web wizard)
+        const { homedir } = await import("node:os");
+        const claudeJsonPath = join(homedir(), ".claude.json");
+        let detectedKey = "";
+        try {
+          const raw = JSON.parse(readFileSync(claudeJsonPath, "utf-8")) as Record<string, unknown>;
+          const pk = raw["primaryApiKey"];
+          if (typeof pk === "string" && pk.length > 0) detectedKey = pk;
+        } catch { /* not found or unreadable — proceed to manual entry */ }
 
-      // Auth mode
-      const authInput = (await ask("Auth mode — none (local only), token (API key), session (multi-user) [none]: ")).trim().toLowerCase();
-      const authMode = (authInput === "token" || authInput === "session") ? authInput : "none";
-      const authBlock: Record<string, unknown> = { mode: authMode };
-      if (authMode === "token") {
-        const token = randomBytes(24).toString("hex");
-        authBlock["token"] = token;
-        console.log(`\n  Auth token: ${token}`);
-        console.log(`  Save this — you'll need it to access the UI and API.\n`);
-      }
+        if (detectedKey) {
+          const masked = `${detectedKey.slice(0, 12)}...`;
+          const answer = (await ask(`Found API key in ~/.claude.json (${masked}) — use it? [Y/n] `)).trim().toLowerCase();
+          apiKey = (answer === "" || answer === "y") ? detectedKey : (await ask("Anthropic API key (sk-ant-...): ")).trim();
+        } else {
+          apiKey = (await ask("Anthropic API key (sk-ant-...): ")).trim();
+        }
 
-      // Aletheia root detection
-      const scriptDir = dirname(fileURLToPath(import.meta.url));
-      const detectedRoot = join(scriptDir, "..", "..");
-      const rootInput = (await ask(`Aletheia root [${detectedRoot}]: `)).trim();
-      const aletheiaRoot = rootInput || detectedRoot;
+        if (!apiKey) {
+          console.error("API key is required.");
+          return;
+        }
+
+        // Gateway port
+        const portStr = (await ask("Gateway port [18789]: ")).trim();
+        port = portStr ? parseInt(portStr, 10) : 18789;
+        if (isNaN(port) || port < 1 || port > 65535) {
+          console.error("Invalid port number.");
+          return;
+        }
+
+        // Auth mode
+        const authInput = (await ask("Auth mode — none (local only), token (API key), session (multi-user) [none]: ")).trim().toLowerCase();
+        authMode = (authInput === "token" || authInput === "session") ? authInput : "none";
+        authBlock = { mode: authMode };
+        if (authMode === "token") {
+          const token = randomBytes(24).toString("hex");
+          authBlock["token"] = token;
+          console.log(`\n  Auth token: ${token}`);
+          console.log(`  Save this — you'll need it to access the UI and API.\n`);
+        }
+
+        // Anchor.json — bootstrap path configuration
+        const { homedir: homedirFn } = await import("node:os");
+        const { writeBootstrapAnchor, anchorPath } = await import("./taxis/bootstrap-loader.js");
+        const anchorFilePath = anchorPath();
+        const defaultNousDir = join(homedirFn(), ".aletheia", "nous");
+        const defaultDeployDir = join(homedirFn(), ".aletheia", "deploy");
+        nousDir = defaultNousDir;
+        deployDir = defaultDeployDir;
+
+        const existingAnchor = readJson(anchorFilePath);
+        if (existingAnchor && typeof existingAnchor === "object") {
+          const a = existingAnchor as { nousDir?: string; deployDir?: string };
+          if (a.nousDir) {
+            const keepNous = (await ask(`nous.dir is currently ${a.nousDir}. Keep it? [Y/n] `)).trim().toLowerCase();
+            if (keepNous === "" || keepNous === "y") {
+              nousDir = a.nousDir;
+            } else {
+              const input = (await ask(`nous.dir [${defaultNousDir}]: `)).trim();
+              if (input) nousDir = input;
+            }
+          } else {
+            const input = (await ask(`nous.dir [${defaultNousDir}]: `)).trim();
+            if (input) nousDir = input;
+          }
+          if (a.deployDir) {
+            const keepDeploy = (await ask(`deploy.dir is currently ${a.deployDir}. Keep it? [Y/n] `)).trim().toLowerCase();
+            if (keepDeploy === "" || keepDeploy === "y") {
+              deployDir = a.deployDir;
+            } else {
+              const input = (await ask(`deploy.dir [${defaultDeployDir}]: `)).trim();
+              if (input) deployDir = input;
+            }
+          } else {
+            const input = (await ask(`deploy.dir [${defaultDeployDir}]: `)).trim();
+            if (input) deployDir = input;
+          }
+        } else {
+          const nousInput = (await ask(`nous.dir [${defaultNousDir}]: `)).trim();
+          if (nousInput) nousDir = nousInput;
+          const deployInput = (await ask(`deploy.dir [${defaultDeployDir}]: `)).trim();
+          if (deployInput) deployDir = deployInput;
+        }
+
+        mkdirSync(nousDir, { recursive: true });
+        mkdirSync(deployDir, { recursive: true });
+        writeBootstrapAnchor(nousDir, deployDir);
+        console.log(`  Anchor: ${anchorFilePath}`);
+
+        // Scaffold _shared/ workspace dirs — authoritative (throws on failure)
+        const { scaffoldNousShared: doScaffold, mergeGitignore: doMerge } = await import("./taxis/nous-scaffold.js");
+        const sharedCreated = doScaffold(nousDir);
+        doMerge(nousDir);
+        if (sharedCreated.length > 0) {
+          console.log(`  Scaffold: ${sharedCreated.join(", ")}`);
+        }
+        // If sharedCreated.length === 0, all dirs already existed — report nothing (silence = nothing new)
+      }
 
       // First agent
       const agentName = (await ask("First agent name (e.g. Atlas): ")).trim();
@@ -100,29 +181,49 @@ program
       const agentId = agentName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
       const agentEmoji = (await ask("Agent emoji [🤖]: ")).trim() || "🤖";
 
-      // Write credentials
-      const credDir = join(paths.configDir(), "credentials");
-      mkdirSync(credDir, { recursive: true });
-      const credPath = join(credDir, "anthropic.json");
-      writeFileSync(credPath, JSON.stringify({ apiKey }, null, 2) + "\n", { mode: 0o600 });
+      // Profile step — collect name, timezone, optional role
+      console.log("\nTell your agent about you (this personalizes how it works with you):");
+      const userName = (await ask("  Your name: ")).trim();
+      const detectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const tzInput = (await ask(`  Timezone [${detectedTz}]: `)).trim();
+      const userTimezone = tzInput || detectedTz;
+      const userRole = (await ask("  Role/title (optional, press Enter to skip): ")).trim();
 
-      // Write base config (scaffoldAgent will append agent + binding)
-      mkdirSync(paths.configDir(), { recursive: true });
-      writeJson(configPath, {
-        agents: { defaults: {}, list: [] },
-        bindings: [],
-        gateway: { port, auth: authBlock },
-        env: { ALETHEIA_ROOT: aletheiaRoot },
-      });
+      const userProfile: import("./taxis/scaffold.js").UserProfile = {
+        name: userName || agentName, // fallback to agent name if user skips
+        role: userRole || "user",
+        style: "balanced", // communication style not asked upfront — emerges through use
+        timezone: userTimezone,
+      };
 
-      // Write env file for systemd compatibility
-      const envPath = join(paths.configDir(), "aletheia.env");
-      writeFileSync(envPath, `ALETHEIA_ROOT=${aletheiaRoot}\n`, "utf-8");
+      if (!profileOnlyMode) {
+        // Write credentials
+        const credDir = join(paths.configDir(), "credentials");
+        mkdirSync(credDir, { recursive: true });
+        const credPath = join(credDir, "anthropic.json");
+        writeFileSync(credPath, JSON.stringify({ apiKey }, null, 2) + "\n", { mode: 0o600 });
 
-      // Scaffold agent using detected root
-      const nousDir = join(aletheiaRoot, "nous");
-      mkdirSync(nousDir, { recursive: true });
-      const templateDir = join(nousDir, "_example");
+        // Write base config (scaffoldAgent will append agent + binding)
+        mkdirSync(paths.configDir(), { recursive: true });
+        writeJson(configPath, {
+          agents: { defaults: {}, list: [] },
+          bindings: [],
+          gateway: { port, auth: authBlock },
+        });
+      }
+
+      // Scaffold agent — resolve nousDir from anchor.json or use value set in anchor step above
+      let scaffoldNousDir: string;
+      if (profileOnlyMode) {
+        const { anchorPath: getAnchorPath } = await import("./taxis/bootstrap-loader.js");
+        const { homedir: homedirFn2 } = await import("node:os");
+        const existingAnchorForProfile = readJson(getAnchorPath()) as { nousDir?: string } | null;
+        scaffoldNousDir = existingAnchorForProfile?.nousDir ?? join(homedirFn2(), ".aletheia", "nous");
+      } else {
+        scaffoldNousDir = nousDir;
+      }
+      mkdirSync(scaffoldNousDir, { recursive: true });
+      const templateDir = join(scaffoldNousDir, "_example");
       if (!existsSync(templateDir)) {
         mkdirSync(templateDir, { recursive: true });
       }
@@ -131,31 +232,26 @@ program
         id: agentId,
         name: agentName,
         emoji: agentEmoji,
-        nousDir,
+        nousDir: scaffoldNousDir,
         configPath,
         templateDir,
+        userProfile,
       });
 
-      const authLabel = authMode === "none"
-        ? "none (no token required)"
-        : authMode === "token"
-          ? "token (saved to config)"
-          : "session (configure users with migrate-auth)";
-
       console.log(`\nSetup complete.`);
-      console.log(`  Config:  ${configPath}`);
+      if (!profileOnlyMode) {
+        const authLabel = authMode === "none"
+          ? "none (no token required)"
+          : authMode === "token"
+            ? "token (saved to config)"
+            : "session (configure users with migrate-auth)";
+        console.log(`  Config:  ${configPath}`);
+        console.log(`  Auth:    ${authLabel}`);
+      }
       console.log(`  Agent:   ${agentName} (${agentId}) → ${result.workspace}`);
-      console.log(`  Auth:    ${authLabel}`);
-      console.log(`  Root:    ${aletheiaRoot}`);
-      console.log(`\nStart the gateway:`);
-      console.log(`  aletheia gateway start`);
-      console.log(`\nThen open:`);
-      console.log(`  http://localhost:${port}/ui`);
-      console.log(`\nYour agent has onboarding instructions — it will learn your`);
-      console.log(`preferences through conversation.`);
-      console.log(`\nUseful commands:`);
-      console.log(`  aletheia doctor        Validate setup`);
-      console.log(`  aletheia agent create  Add another agent`);
+      if (userName) console.log(`  Profile: ${userName}${userRole ? ` — ${userRole}` : ""} (${userTimezone})`);
+      console.log(`\nNext step:`);
+      console.log(`  aletheia start`);
     } finally {
       rl.close();
     }
@@ -185,49 +281,58 @@ gateway
   });
 
 program
-  .command("doctor")
-  .description("Validate configuration and check system health")
-  .option("-c, --config <path>", "Config file path")
-  .option("--fix", "Apply automatic fixes for fixable issues")
-  .option("--dry-run", "Show what --fix would do without applying")
-  .action((opts: { config?: string; fix?: boolean; dryRun?: boolean }) => {
-    const { results, config } = runDiagnostics();
+  .command("refresh-token")
+  .description("Check OAuth token expiry and refresh if needed")
+  .action(async () => {
+    const { readCredentials, isTokenExpired, refreshOAuthToken } = await import("./hermeneus/oauth-refresh.js");
+    const creds = readCredentials();
+    if (!creds) {
+      console.log("❌ No OAuth credentials found (not using OAuth authentication)");
+      process.exit(0);
+    }
 
-    if (config) {
-      console.log(`Aletheia Doctor — ${config.agents.list.length} agents\n`);
+    const remaining = creds.expiresAt - Date.now();
+    const hoursLeft = (remaining / 3_600_000).toFixed(1);
+
+    if (!isTokenExpired(creds.expiresAt)) {
+      console.log(`✅ Token valid — ${hoursLeft}h remaining (expires ${new Date(creds.expiresAt).toISOString()})`);
+      process.exit(0);
+    }
+
+    console.log(`⚠️  Token expired or expiring soon (${hoursLeft}h) — attempting refresh...`);
+    const result = await refreshOAuthToken();
+    if (result.success) {
+      console.log(`✅ Token refreshed — new expiry: ${new Date(result.newExpiresAt!).toISOString()}`);
     } else {
-      console.log("Aletheia Doctor\n");
+      console.log(`❌ Refresh failed: ${result.error}`);
+      process.exit(1);
     }
+  });
 
-    console.log(formatResults(results, opts.dryRun || opts.fix));
+program
+  .command("doctor")
+  .description("Check system health — connectivity, dependencies, and boot persistence")
+  .action(async () => {
+    const [connectivity, bootPersistence] = await Promise.all([
+      runConnectivityChecks(),
+      Promise.resolve(runBootPersistenceChecks()),
+    ]);
+    const dependencies = runDependencyChecks();
 
-    if (opts.dryRun) {
-      const fixable = results.filter((r) => r.fix);
-      if (fixable.length > 0) {
-        console.log(`\nDry run: ${fixable.length} fix(es) would be applied.`);
+    // Surface configuration checks from runDiagnostics (bootstrap_anchor, nous_scaffold, deploy_config, secret_refs)
+    let configSection = "";
+    try {
+      const { results: diagResults } = runDiagnostics();
+      const configChecks = diagResults.filter((r) =>
+        ["bootstrap_anchor", "nous_scaffold", "deploy_config", "secret_refs"].includes(r.name)
+      );
+      if (configChecks.length > 0) {
+        configSection = `\n── Configuration ──\n${formatResults(configChecks)}\n`;
       }
-    } else if (opts.fix) {
-      const fixable = results.filter((r) => r.fix);
-      if (fixable.length === 0) {
-        console.log("\nNothing to fix.");
-      } else {
-        console.log(`\nApplying ${fixable.length} fix(es)...`);
-        const { applied, failed } = applyFixes(results);
-        console.log(`  Applied: ${applied}`);
-        if (failed.length > 0) {
-          console.log(`  Failed: ${failed.length}`);
-          for (const f of failed) console.log(`    X ${f}`);
-        }
+    } catch { /* runDiagnostics errors are non-fatal for doctor output */ }
 
-        // Re-run to verify
-        console.log("\nRe-checking...");
-        const { results: recheck } = runDiagnostics();
-        console.log(formatResults(recheck));
-      }
-    }
-
-    const errors = results.filter((r) => r.status === "error").length;
-    if (errors > 0) process.exit(1);
+    console.log(configSection + formatDoctorOutput(connectivity, dependencies, bootPersistence));
+    // Exit 0 always — doctor is informational, not assertion-based
   });
 
 program
@@ -238,7 +343,17 @@ program
   .action(async (opts: { url: string; token?: string }) => {
     try {
       const headers: Record<string, string> = {};
-      if (opts.token) headers["Authorization"] = `Bearer ${opts.token}`;
+      // Auto-read token from config if not provided
+      let token = opts.token;
+      if (!token) {
+        try {
+          const { loadConfig } = await import("./taxis/loader.js");
+          const cfg = loadConfig();
+          const raw = cfg.gateway?.auth?.token;
+          if (typeof raw === "string") token = raw;
+        } catch { /* config unavailable */ }
+      }
+      if (token) headers["Authorization"] = `Bearer ${token}`;
 
       const res = await fetch(`${opts.url}/api/metrics`, { headers, signal: AbortSignal.timeout(5000) });
       if (!res.ok) {
@@ -330,40 +445,6 @@ program
       }
     } catch (error) {
       console.error(`Failed: ${error instanceof Error ? error.message : error}`);
-      process.exit(1);
-    }
-  });
-
-program
-  .command("plan")
-  .description("Start or resume a Dianoia planning project")
-  .option("-a, --agent <id>", "Agent ID to plan for")
-  .option("-u, --url <url>", "Gateway URL", "http://localhost:18789")
-  .option("-t, --token <token>", "Auth token")
-  .action(async (opts: { agent?: string; url: string; token?: string }) => {
-    try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (opts.token) headers["Authorization"] = `Bearer ${opts.token}`;
-
-      const res = await fetch(`${opts.url}/api/sessions/send`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          agentId: opts.agent ?? "syn",
-          message: "/plan",
-          sessionKey: "cli:plan",
-        }),
-        signal: AbortSignal.timeout(120000),
-      });
-
-      const data = await res.json() as Record<string, unknown>;
-      if (!res.ok) {
-        console.error(`Error: ${(data["error"] as string | undefined) ?? res.statusText}`);
-        process.exit(1);
-      }
-      console.log((data["response"] as string | undefined) ?? "(no response)");
-    } catch (error) {
-      console.error(`Failed: ${error instanceof Error ? error.message : String(error)}`);
       process.exit(1);
     }
   });
@@ -1239,6 +1320,325 @@ program
       console.log(`  Old token preserved for API access.`);
     }
     console.log(`\nRestart the gateway to apply: systemctl restart aletheia`);
+  });
+
+// --- Channel management (Agora) ---
+const channelCmd = program.command("channel").description("Channel management (Agora)");
+
+channelCmd
+  .command("list")
+  .description("Show configured channels and their status")
+  .action(async () => {
+    const { channelList } = await import("./agora/cli.js");
+    channelList();
+  });
+
+channelCmd
+  .command("add <channel>")
+  .description("Add and configure a channel (e.g., slack)")
+  .action(async (channel: string) => {
+    const { isSupportedChannel, channelAddSlack, listSupportedChannels } = await import("./agora/cli.js");
+    if (!isSupportedChannel(channel)) {
+      console.error(`Unknown channel: "${channel}". Supported: ${listSupportedChannels().join(", ")}`);
+      process.exit(1);
+    }
+    if (channel === "slack") {
+      await channelAddSlack();
+    }
+  });
+
+channelCmd
+  .command("remove <channel>")
+  .description("Remove a channel configuration")
+  .action(async (channel: string) => {
+    const { channelRemove } = await import("./agora/cli.js");
+    channelRemove(channel);
+  });
+
+// --- Plan (Dianoia) ---
+const planCmd = program.command("plan").description("Dianoia planning projects");
+
+async function planApi(path: string, opts: { url: string; token?: string }, method = "GET", body?: unknown): Promise<unknown> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  let token = opts.token;
+  if (!token) {
+    try {
+      const { loadConfig: lc } = await import("./taxis/loader.js");
+      const cfg = lc();
+      const raw = cfg.gateway?.auth?.token;
+      if (typeof raw === "string") token = raw;
+    } catch { /* config unavailable */ }
+  }
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${opts.url}${path}`, {
+    method,
+    headers,
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
+planCmd
+  .command("list")
+  .description("List all planning projects")
+  .option("-u, --url <url>", "Gateway URL", "http://localhost:18789")
+  .option("-t, --token <token>", "Auth token")
+  .action(async (opts: { url: string; token?: string }) => {
+    try {
+      const data = await planApi("/api/planning/projects", opts) as { projects: Array<Record<string, unknown>> };
+      const projects = data.projects ?? [];
+      if (projects.length === 0) {
+        console.log("No planning projects.");
+        return;
+      }
+      console.log(`${"ID".padEnd(30)}  ${"State".padEnd(12)}  Goal`);
+      console.log(`${"─".repeat(30)}  ${"─".repeat(12)}  ${"─".repeat(40)}`);
+      for (const p of projects) {
+        const id = String(p["id"] ?? "").slice(0, 28);
+        const state = String(p["state"] ?? "unknown").padEnd(12);
+        const goal = String(p["goal"] ?? "").slice(0, 60);
+        console.log(`${id.padEnd(30)}  ${state}  ${goal}`);
+      }
+    } catch (error) {
+      console.error(`Failed: ${error instanceof Error ? error.message : error}`);
+      process.exit(1);
+    }
+  });
+
+planCmd
+  .command("show <id>")
+  .description("Show project details and roadmap")
+  .option("-u, --url <url>", "Gateway URL", "http://localhost:18789")
+  .option("-t, --token <token>", "Auth token")
+  .action(async (id: string, opts: { url: string; token?: string }) => {
+    try {
+      const data = await planApi(`/api/planning/projects/${id}`, opts) as { project: Record<string, unknown> };
+      const p = data.project;
+      if (!p) { console.error("Project not found."); process.exit(1); }
+
+      console.log(`Project: ${p["goal"]}`);
+      console.log(`  ID:    ${p["id"]}`);
+      console.log(`  State: ${p["state"]}`);
+      if (p["constraints"]) console.log(`  Scope: ${p["constraints"]}`);
+      console.log();
+
+      // Phases
+      const phases = (p["phases"] ?? []) as Array<Record<string, unknown>>;
+      if (phases.length > 0) {
+        console.log("Phases:");
+        for (const ph of phases) {
+          const icon = ph["state"] === "complete" ? "✅" : ph["state"] === "executing" ? "🔄" : "⬜";
+          const reqs = (ph["requirements"] ?? []) as string[];
+          console.log(`  ${icon} ${ph["name"]}${reqs.length > 0 ? ` (${reqs.length} reqs)` : ""}`);
+          if (ph["goal"]) console.log(`     ${ph["goal"]}`);
+        }
+      }
+
+      // Requirements summary
+      const reqs = (p["requirements"] ?? []) as Array<Record<string, unknown>>;
+      if (reqs.length > 0) {
+        const v1 = reqs.filter(r => r["tier"] === "v1").length;
+        const v2 = reqs.filter(r => r["tier"] === "v2").length;
+        const oos = reqs.filter(r => r["tier"] === "out-of-scope").length;
+        console.log(`\nRequirements: ${v1} v1, ${v2} v2, ${oos} out-of-scope`);
+      }
+    } catch (error) {
+      console.error(`Failed: ${error instanceof Error ? error.message : error}`);
+      process.exit(1);
+    }
+  });
+
+planCmd
+  .command("abandon <id>")
+  .description("Abandon a planning project")
+  .option("-u, --url <url>", "Gateway URL", "http://localhost:18789")
+  .option("-t, --token <token>", "Auth token")
+  .action(async (id: string, opts: { url: string; token?: string }) => {
+    try {
+      await planApi(`/api/planning/projects/${id}`, opts, "DELETE");
+      console.log(`Project ${id} abandoned.`);
+    } catch (error) {
+      console.error(`Failed: ${error instanceof Error ? error.message : error}`);
+      process.exit(1);
+    }
+  });
+
+// --- Deploy ---
+program
+  .command("deploy")
+  .description("Build and deploy Aletheia from current source")
+  .option("--dry-run", "Show what would be done without executing")
+  .option("--skip-ui", "Skip UI build (runtime-only update)")
+  .option("--no-restart", "Build and copy but don't restart the daemon")
+  .action(async (opts: { dryRun?: boolean; skipUi?: boolean; restart?: boolean }) => {
+    const { existsSync: exists } = await import("node:fs");
+    const { execSync } = await import("node:child_process");
+    const { join } = await import("node:path");
+    const { loadBootstrapAnchor } = await import("./taxis/bootstrap-loader.js");
+
+    const dryRun = opts.dryRun ?? false;
+    const skipUi = opts.skipUi ?? false;
+    const restart = opts.restart !== false; // default true unless --no-restart
+
+    const run = (cmd: string, label: string, cwd?: string): boolean => {
+      if (dryRun) {
+        console.log(`  [dry-run] ${label}: ${cmd}${cwd ? ` (in ${cwd})` : ""}`);
+        return true;
+      }
+      try {
+        console.log(`  ${label}...`);
+        execSync(cmd, { cwd, stdio: "pipe", timeout: 120_000 });
+        console.log(`    ✅ done`);
+        return true;
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`    ❌ ${msg.split("\n")[0]}`);
+        return false;
+      }
+    };
+
+    // Find source root — look for infrastructure/runtime/package.json
+    let sourceRoot: string;
+    try {
+      const { anchor } = loadBootstrapAnchor();
+      // Anchor gives us deploy dir; source root is typically the repo root
+      // Walk up from anchor's nousDir to find the repo
+      const repoMarkers = ["infrastructure/runtime/package.json", ".git"];
+      let candidate = join(anchor.nousDir, "..");
+      let found = false;
+      for (let i = 0; i < 5; i++) {
+        if (repoMarkers.every(m => exists(join(candidate, m)))) {
+          sourceRoot = candidate;
+          found = true;
+          break;
+        }
+        candidate = join(candidate, "..");
+      }
+      if (!found) {
+        // Fallback: common location
+        if (exists("/mnt/ssd/aletheia/infrastructure/runtime/package.json")) {
+          sourceRoot = "/mnt/ssd/aletheia";
+        } else {
+          console.error("Cannot locate Aletheia source root. Run from the repo or set anchor.json.");
+          process.exit(1);
+          return;
+        }
+      }
+    } catch {
+      if (exists("/mnt/ssd/aletheia/infrastructure/runtime/package.json")) {
+        sourceRoot = "/mnt/ssd/aletheia";
+      } else {
+        console.error("Cannot locate Aletheia source root.");
+        process.exit(1);
+        return;
+      }
+    }
+
+    const runtimeDir = join(sourceRoot!, "infrastructure", "runtime");
+    const uiDir = join(sourceRoot!, "ui");
+
+    // Determine deploy target
+    let deployDir: string;
+    try {
+      const { anchor } = loadBootstrapAnchor();
+      deployDir = anchor.deployDir;
+    } catch {
+      deployDir = join(sourceRoot!, "deploy");
+    }
+
+    console.log(`\nAletheia Update${dryRun ? " (dry run)" : ""}`);
+    console.log(`  Source:  ${sourceRoot!}`);
+    console.log(`  Deploy:  ${deployDir}`);
+    console.log();
+
+    // Step 1: Git pull (with dirty check)
+    try {
+      if (!dryRun) {
+        const status = execSync("git status --porcelain", { cwd: sourceRoot!, encoding: "utf-8" }).trim();
+        if (status) {
+          console.log(`  ⚠️  Working tree has uncommitted changes (${status.split("\n").length} files)`);
+        }
+      }
+    } catch { /* git status failed — proceed anyway */ }
+
+    const sha1 = dryRun ? "abc1234" : execSync("git rev-parse --short HEAD", { cwd: sourceRoot!, encoding: "utf-8" }).trim();
+    if (!run("git pull origin main --ff-only", "Git pull", sourceRoot!)) {
+      console.error("\nGit pull failed. Resolve conflicts first.");
+      process.exit(1);
+    }
+    const sha2 = dryRun ? "def5678" : execSync("git rev-parse --short HEAD", { cwd: sourceRoot!, encoding: "utf-8" }).trim();
+    if (sha1 === sha2 && !dryRun) {
+      console.log("  Already up to date.");
+    }
+
+    // Step 2: Build runtime
+    if (!run("npx tsdown", "Build runtime", runtimeDir)) {
+      process.exit(1);
+    }
+
+    // Step 3: Build UI (unless --skip-ui)
+    if (!skipUi) {
+      if (exists(join(uiDir, "package.json"))) {
+        if (!run("npm run build", "Build UI", uiDir)) {
+          process.exit(1);
+        }
+      } else {
+        console.log("  [skip] UI directory not found");
+      }
+    } else {
+      console.log("  [skip] UI build (--skip-ui)");
+    }
+
+    // Step 4: Copy artifacts
+    const { mkdirSync } = await import("node:fs");
+    if (!dryRun) mkdirSync(deployDir, { recursive: true });
+
+    run(`cp -r ${join(runtimeDir, "dist", "entry.mjs")} ${join(deployDir, "entry.mjs")}`, "Copy runtime artifact");
+
+    if (!skipUi && exists(join(uiDir, "dist"))) {
+      run(`rm -rf ${join(deployDir, "ui")} && cp -r ${join(uiDir, "dist")} ${join(deployDir, "ui")}`, "Copy UI build");
+    }
+
+    // Copy shared assets
+    for (const dir of ["shared/bin", "shared/config", "shared/templates"]) {
+      const src = join(sourceRoot!, dir);
+      const dest = join(deployDir, dir);
+      if (exists(src)) {
+        run(`mkdir -p ${dest} && rsync -a --delete ${src}/ ${dest}/`, `Sync ${dir}`);
+      }
+    }
+
+    // Step 5: Restart
+    if (restart) {
+      const finalSha = dryRun ? "def5678" : execSync("git rev-parse --short HEAD", { cwd: sourceRoot!, encoding: "utf-8" }).trim();
+      run("systemctl --user restart aletheia", "Restart daemon");
+
+      if (!dryRun) {
+        // Wait for startup, check health
+        console.log("  Waiting for startup...");
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+          const res = await fetch("http://localhost:18789/api/metrics", { signal: AbortSignal.timeout(5000) });
+          if (res.ok) {
+            console.log(`  ✅ Gateway responding`);
+          } else {
+            console.log(`  ⚠️  Gateway returned ${res.status}`);
+          }
+        } catch {
+          console.log("  ⚠️  Gateway not responding — check logs: journalctl --user -u aletheia -n 50");
+        }
+      }
+
+      console.log(`\n✅ Updated to ${dryRun ? sha2 : finalSha}`);
+    } else {
+      console.log("\n✅ Build complete (restart skipped — use systemctl --user restart aletheia)");
+    }
   });
 
 program.parse();
