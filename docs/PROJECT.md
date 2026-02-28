@@ -231,7 +231,7 @@ opt-level = 2      # optimize deps even in dev — faster iteration
 | 1.2 | `mneme` (CozoDB) | Unified embedded store: HNSW vectors + graph + relations + bi-temporal facts — single DB, zero external services |
 | 1.3 | `mneme` (embedding) | `EmbeddingProvider` trait: fastembed-rs local default, optional Voyage-4-large. JEPA-informed: embed once, reuse for shift detection, recall, classification |
 | 1.4 | `mneme` (recall) | Hybrid retrieval (vector + graph + BM25), MMR diversity, temporal decay, recollection-as-memory |
-| 1.5 | `hermeneus` (complete) | Multi-credential routing, OAuth auto-refresh, `trait LlmProvider`, token counting |
+| 1.5 | `hermeneus` (complete) | Multi-credential routing, OAuth auto-refresh, `trait LlmProvider`, token counting (`/v1/messages/count_tokens`), batch API integration (50% discount for async ops: distillation, extraction, cron), server-side compaction as emergency fallback, citations for memory-grounded responses |
 
 **Absorbed ideas:**
 - **Spec 27 (Embedding Space Intelligence):** Semantic shift detection, embedding-space similarity (replacing Jaccard), predictive context assembly. The mneme crate implements these natively rather than bolting them onto text heuristics.
@@ -256,12 +256,21 @@ opt-level = 2      # optimize deps even in dev — faster iteration
 | 2.4 | Agent-writable workspace | MNEME.md append, CONTEXT.md update, protected SOUL.md/TELOS.md |
 
 **Absorbed ideas:**
-- **Spec 35 (Context Engineering):** Cache-group bootstrap with stable prefix, skill relevance filtering, turn bypass classifier. Built into nous::bootstrap.
+- **Spec 35 (Context Engineering):** Cache-group bootstrap with stable prefix, skill relevance filtering, turn bypass classifier. Built into nous::bootstrap. Token budget: current TS system uses ~31,500–46,500 tokens/turn for system prompt. Target savings: ~7,700 tokens/turn via two-tier tool descriptions (proc macro short/extended, -4K), semantic skill retrieval (top-5 not all 130, -2K), tool consolidation (sessions_spawn+dispatch→1, sessions_send+ask→1, 5 memory mutation→2, -800), auto-activate tools by domain (-900).
 - **Spec 42, Gap 5 (Pressure-Triggered Consolidation):** Sleep agent spawned on three triggers: turn count (20), session idle (2hr), token pressure (75%). Token pressure fires *before* distillation — consolidation promotes knowledge to long-term storage while distillation compresses conversation. Complementary, not competing (G-08). Haiku-tier, async, outputs MNEME updates.
 - **Spec 42, Gap 6 (Workspace Hygiene):** Session-start check for TELOS staleness, MNEME bloat, orphaned files. Local reads only, zero LLM cost.
 - **Spec 42, Gap 7 (Agent-Writable Files):** Binary model — file is writable or not (G-09). SOUL.md, TELOS.md, USER.md, IDENTITY.md = operator-owned. MNEME.md, CONTEXT.md = agent-writable. `workspace_note` tool with size limits and audit trail. Agent self-knowledge goes in MNEME, not IDENTITY.
 - **Spec 42, Gap 4 (Epistemic Confidence):** Behavioral norm in AGENTS.md template — `[verified]`, `[inferred]`, `[assumed]` markers. No code dependency.
 - **Issue #338 (Coding tool quality):** Per-call `cwd` parameter, per-nous `workingDir` config via oikos cascade, 120s default timeout, glob tool.
+
+**Performance patterns (from QA doc 05 Agent 2, must address in M2):**
+- `rusqlite::CachedStatement` for all session queries — TS recompiles SQL every call
+- SSE serialize-once broadcast — serialize message once, write bytes to all connected clients
+- `serde_json::value::RawValue` for lazy JSON deserialization — don't parse `workingState`/`distillationPriming` until needed
+- `LazyLock<RegexSet>` for interaction signals — TS recompiles RegExp inside loops
+- `bumpalo` arena allocator for per-turn transient data — allocation-free tool loop
+- `notify` crate for bootstrap file watching — TS does 11 sync reads per turn, cache and recompute only on change
+- Batch tool result messages into single SQLite transaction
 
 **Actor model critical pitfalls (from QA doc 03, must address in M2.2):**
 1. **Channel sizing** — bounded channels with backpressure. Unbounded = memory leak. Default: 32, tune empirically.
@@ -311,7 +320,7 @@ opt-level = 2      # optimize deps even in dev — faster iteration
 |-------|-------|----------------|
 | 4.1 | `nous` (multi-actor) | Multiple NousActors on real Tokio threads, independent inboxes |
 | 4.2 | `daemon` | Per-nous cron, evolution, prosoche, graph maintenance, morning digest |
-| 4.3 | `dianoia` | Planning FSM reviewed from first principles, autonomy gradient |
+| 4.3 | `dianoia` | Planning FSM from first principles. **Core redesign:** workspace model (not pipeline). 3 operating modes: full project (research→execute→verify), quick task (appetite-based, time-boxed), and autonomous background. Skip any phase that adds no value. State machine with exhaustive `match` on typed enums — every transition explicit. |
 | 4.4 | Cross-nous coordination | Competence-aware routing, structured task handoff, priority queue |
 
 **Absorbed ideas:**
@@ -674,11 +683,11 @@ Progress updates go here as milestones complete. Daily work tracked in `memory/Y
 
 | Document | Purpose | Key Value |
 |----------|---------|-----------|
-| `docs/rust-qa/01_PROJECT-QA.md` | Gap analysis, design review | 30 design items, 19 unaccounted features — **all integrated above** |
-| `docs/rust-qa/02_crates-audit.md` | 1,022 crates analyzed, 142 relevant | Workspace Cargo.toml template, crate-per-module mapping, cross-compilation notes |
-| `docs/rust-qa/03_rust-agent-references.md` | 22-section implementation guide | Feed §1–4, §6–7, §10, §22 to coding agents. **Key integrations:** snafu error layering, cancellation safety, actor pitfalls, reference repos. |
-| `docs/rust-qa/04_rust-agent-pitfalls.md` | 53 pitfall entries by category | Context window material for coding agents. **Key integrations:** newtypes, `#[non_exhaustive]`, typestate, `#[expect(lint)]`, `#[diagnostic::on_unimplemented]` → implementation standards. Feed full doc to coding agents alongside doc 03. Note: quick ref table says thiserror — we use snafu. |
-| `docs/rust-qa/05_PROJECT-QA-RESEARCH.md` | Raw research from all agents | Cognitive architecture research, Dianoia audit, GSD analysis (11 patterns) |
+| `docs/rust-qa/01_PROJECT-QA.md` | Gap analysis, design review | **Integrated.** 30 design items, 19 unaccounted features → milestones, surface inventories. |
+| `docs/rust-qa/02_crates-audit.md` | 1,022 crates analyzed, 142 relevant | **Integrated.** → Dependency Policy, Crate-to-Module Mapping, Release Profile, cross-compilation notes. |
+| `docs/rust-qa/03_rust-agent-references.md` | 22-section implementation guide | **Integrated.** Patterns + code examples → `.claude/rules/rust.md`. Technology decisions → tech table + implementation standards. |
+| `docs/rust-qa/04_rust-agent-pitfalls.md` | 53 pitfall entries by category | **Integrated.** All pitfalls with code examples → `.claude/rules/rust.md`. Standards → implementation standards table. |
+| `docs/rust-qa/05_PROJECT-QA-RESEARCH.md` | Raw research from 10 agents | **Integrated:** Performance patterns (→ M2 constraints), Anthropic API features (→ M1.5 hermeneus), context token economics (→ Spec 35 notes), cognitive architecture frameworks (→ Research References), ecosystem watch items. Raw findings preserved for deep dives. |
 | `docs/rust-qa/06_STANDARDS.md` | Unified Rust code standards | Replaces STANDARDS.md for Rust codebase. Typestate, allocation, unsafe policy, lint config. |
 
 ### Reference Repositories (from QA doc 03 §21)
@@ -694,3 +703,41 @@ Architecture-similar open source Rust projects. Study for patterns, not to copy.
 | [tokio-rs/axum](https://github.com/tokio-rs/axum) | Our HTTP framework | SSE, WebSocket, state extraction, middleware, testing |
 | [greptime/greptimedb](https://github.com/GreptimeTeam/greptimedb) | **Error handling model** — snafu + Location traces | Large workspace error layering pattern we're adopting |
 | [influxdata/influxdb](https://github.com/influxdata/influxdb) | Large async workspace | Query engine, Arrow integration, async patterns at scale |
+
+### Research References (from QA doc 05)
+
+Cognitive architecture and memory systems research informing Aletheia's design.
+
+**Frameworks adopted:**
+| Framework | Source | Aletheia Application |
+|-----------|--------|---------------------|
+| CoALA Memory Taxonomy | Princeton (arxiv 2309.02427) | Formalize working/episodic/semantic/procedural as distinct Rust types in mneme |
+| Complementary Learning Systems | CLS Survey (arxiv 2512.23343) | Two-speed memory: fast episodic encoding (every turn) + slow semantic extraction (nightly cron = hippocampal replay) |
+| Global Workspace Theory | Novel application | Prosoche IS a GWT implementation — formalize competition/selection/broadcast phases |
+| ACT-R Activation Retrieval | Anderson 1993 | Memory activation = recency + frequency + contextual fit, not just embedding similarity. Decay over time, increase with use. |
+| Recollection-as-Memory | OwlCore Exocortex | Every `recall()` creates association trace — self-improving retrieval. Already in M1.4. |
+
+**Patterns to track (M4+):**
+| Pattern | Source | When |
+|---------|--------|------|
+| Spacing-effect review | Cognitive science | Graduated review intervals for memory consolidation (nightly→weekly is coarse) |
+| Transactive memory | Social cognition | Each nous maintains model of what other nous know — smarter routing |
+| Stigmergic coordination | Pressure-field model (arxiv 2601.08129v2) | Compute "badness" per domain, agents gravitate to high-pressure areas. O(1) coordination. |
+| Active Inference | VERSES AI / pymdp | Agents minimize surprise not maximize reward — natural curiosity + caution |
+| Skill memory lifecycle | MemOS | Skills should evolve: usage tracking, refinement on outcomes, decay when unused |
+
+**Key research repos:**
+| Repository | Value |
+|-----------|-------|
+| [getzep/graphiti](https://github.com/getzep/graphiti) | Temporal knowledge graph — bi-temporal edges, episode-centric |
+| [Arlodotexe/OwlCore.AI.Exocortex](https://github.com/Arlodotexe/OwlCore.AI.Exocortex) | Recollection-as-memory pattern — recall is a write op |
+| [MemTensor/MemOS](https://github.com/MemTensor/MemOS) | Memory OS with skill lifecycle (MemCube, scheduling, multi-modal) |
+| [OpenSPG/KAG](https://github.com/OpenSPG/KAG) | Knowledge-augmented generation — logical query decomposition |
+| [EvoAgentX/EvoAgentX](https://github.com/EvoAgentX/EvoAgentX) | Self-evolving agent workflows |
+| [infer-actively/pymdp](https://github.com/infer-actively/pymdp) | Active inference framework |
+
+**Ecosystem watch:**
+- **presage** — Native Rust Signal client (AGPL). Could eliminate signal-cli JVM subprocess. Unstable API, monitor monthly.
+- **Wassette** (Microsoft) — WASM Components via MCP for sandboxed tool execution. Deny-by-default permissions. Aligns with our wasmtime prostheke design.
+- **redb 3.0** — Pure Rust embedded KV (ACID+MVCC). Alternative to CozoDB for simpler storage needs.
+- **Official MCP Rust SDK** — `modelcontextprotocol/rust-sdk`. Track alongside rmcp.
