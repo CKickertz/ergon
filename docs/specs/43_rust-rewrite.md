@@ -30,20 +30,32 @@ The home deployment (Syn, Akron, Syl, craft nous) is the core use case. The alwa
 | Async runtime | Tokio | Node.js event loop | Industry standard, Axum is built on it |
 | HTTP server | Axum | Hono | Tokio team, SSE built-in, cleaner middleware |
 | HTTP client | reqwest | node-fetch | Async, connection pooling, used for Anthropic + channel calls |
-| Anthropic API | Own client (~400 LOC) | @anthropic-ai/sdk | Stable API, reqwest + SSE, we own it |
-| Vector store | qdrant-client (official) | mem0 → Qdrant | First-party Rust client, full async |
-| Graph store | neo4rs (Neo4j Labs) | mem0 → Neo4j | Adequate for Cypher, all we need |
-| Embeddings | fastembed-rs | Python fastembed | Same team, ONNX-based, local, HIPAA-safe |
+| Anthropic API | Own client (~600 LOC) | @anthropic-ai/sdk | Stable API, reqwest + SSE, adaptive thinking, Tool Search Tool |
+| Unified store | cozo (CozoDB) | Qdrant + Neo4j | Rust-native embedded: HNSW vectors + Datalog graph + stored relations. Zero external services. `StorageProvider` trait boundary. |
+| Embeddings | fastembed-rs + `EmbeddingProvider` trait | Python fastembed | Default: local ONNX. Optional: Voyage-4-large HTTP. Per-instance config. |
 | Memory abstraction | None (mem0 dropped) | mem0 | ~50 lines of LLM loop replaces the entire library |
 | Session store | rusqlite + bundled | better-sqlite3 | No native addon pain, WAL mode |
-| Config | serde + validator | Zod | serde is the gold standard |
-| Errors | thiserror enums | AletheiaError hierarchy | Compile-time exhaustive matching |
-| Logging | tracing | tslog | Spans, layers, OpenTelemetry, journald |
+| Encryption | XChaCha20Poly1305 | None | Per-message encryption at rest, ~700ns/msg |
+| Config | figment + serde + validator | Zod | figment handles oikos cascade natively (YAML + env + CLI). By Rocket author. |
+| IDs | ulid + uuid | uuid | ulid for time-sorted data (natural CozoDB ordering). uuid v4 for non-temporal. |
+| Errors | snafu + anyhow + miette | AletheiaError hierarchy | snafu for library enums (context wrapping, Location traces — GreptimeDB pattern). anyhow for application. miette for diagnostics. |
+| Logging | tracing + Langfuse | tslog | Spans, layers, OTel, journald. Langfuse for LLM traces. |
 | CLI | clap | Commander | Compile-time validation, derive macros |
 | JWT | jsonwebtoken crate | jsonwebtoken (npm) | Direct equivalent |
 | Event bus | tokio::sync::broadcast | EventEmitter | Typed, backpressure-aware |
 | Plugin system | WASM via wasmtime | Dynamic JS import() | Sandboxed, portable, any-language plugins, OSS-ready |
-| MCP | rmcp v0.17 (official) | @modelcontextprotocol/sdk | Same org maintains both |
+| JSON | sonic-rs | serde_json | SIMD-accelerated, 2-3x faster |
+| Hashing | blake3 + foldhash | crypto.createHash / ahash | blake3 for content hashing, foldhash for HashMap keys |
+| Secrets | secrecy | None | `SecretString` — zeroizes on drop, redacts in Debug |
+| Hot reload | arc-swap + notify | SIGUSR1 | Zero-downtime config swap + file watching |
+| Strings | compact_str | String | 24-byte inline for short strings |
+| Enums | strum | None | Derive Display, EnumString, EnumIter |
+| Git | gix | simple-git (npm) | Rust-native git for workspace auto-commit |
+| Password | argon2 | bcrypt | Memory-hard password hashing for symbolon |
+| Cron | cron + jiff | cron (npm) + luxon | Schedule parsing + time/date |
+| Browser | chromiumoxide | None | CDP wrapper, indexed DOM |
+| Testing | bolero + proptest + cargo-llvm-cov | vitest | Unified fuzz/property/coverage |
+| MCP | rmcp (pin version) | @modelcontextprotocol/sdk | Pre-1.0 — pin exact, wrap in trait |
 | Signal | signal-cli subprocess (unchanged) | Same | Keep the JVM binary, rewrite the Rust glue |
 | Channel layer | ChannelProvider trait | agora TS | Signal + Slack first, trait handles future channels |
 | UI | Svelte 5 (unchanged) | — | No reason to change |
@@ -82,11 +94,11 @@ aletheia binary
 ├── hermeneus     — Anthropic client, model routing, credential management
 ├── organon       — tool registry + built-in tools
 ├── dianoia       — planning / project orchestration
-├── mneme         — merged memory layer
-│   ├── vector    — Qdrant (qdrant-client)
-│   ├── graph     — Neo4j (neo4rs)
-│   ├── embed     — fastembed-rs (local ONNX)
-│   └── recall    — retrieval + scoring pipeline
+├── mneme         — unified memory (CozoDB embedded + fastembed-rs + extraction)
+│   ├── store     — CozoDB: vectors, graph, relations, bi-temporal facts
+│   ├── embed     — EmbeddingProvider trait: fastembed-rs (local) | HTTP API (Voyage)
+│   ├── extract   — LLM fact extraction, entity resolution, contradiction detection
+│   └── recall    — hybrid retrieval (vector + graph + BM25), MMR, recollection-as-memory
 ├── daemon        — per-nous background tasks (see below)
 ├── taxis         — config, path resolution, oikos hierarchy, secret refs, nous scaffold
 ├── koina         — errors, tracing, safe wrappers, fs utils
@@ -131,9 +143,9 @@ Token usage is determined by API calls, not process/task model. A dormant nous c
 
 ---
 
-## Memory Architecture (Merged, No mem0)
+## Memory Architecture (Unified CozoDB, No mem0, No External Services)
 
-The Python sidecar becomes the `mneme` module inside the runtime. Zero IPC — direct function calls.
+The Python sidecar, Qdrant container, and Neo4j container are all replaced by `mneme` — an embedded CozoDB database inside the binary. Zero IPC, zero Docker dependencies for memory.
 
 **What mem0 did (reimplement in ~50 lines):**
 
@@ -148,16 +160,24 @@ async fn decide_action(fact: &Fact, similar: &[Memory]) -> MemoryAction;
 enum MemoryAction { Add, Update(MemoryId), Delete(MemoryId), NoOp }
 ```
 
+**CozoDB provides all three storage layers:**
+- **Vectors:** HNSW indexing with cosine/L2/IP metrics. Per-agent scoping via `nous_id` field. Replaces Qdrant.
+- **Graph:** Datalog with stratified negation. Built-in algorithms (PageRank, community detection). Replaces Neo4j + Cypher.
+- **Relations:** Stored relations for entity metadata, bi-temporal facts. Replaces custom SQLite tables.
+
 **What was already custom (implement from first principles):**
-- Temporal logic — bi-temporal facts, invalidation, episodes (Neo4j Cypher)
-- Graph extraction pipeline (neo4rs + LLM prompts)
-- Entity resolution, deduplication, evolution, decay (Qdrant + Neo4j)
+- Bi-temporal knowledge graph — `[valid_from, valid_to)` × `[recorded_at, superseded_at)`
+- Graph extraction pipeline (CozoDB Datalog + LLM prompts)
+- Entity resolution, deduplication, evolution, decay
 - 6-factor recall scoring: cosine → recency boost → exponential decay → access boost → noise penalty → domain rerank
-- Cross-nous scoring (shared Neo4j graph, Qdrant scoped per-agent)
+- Cross-nous scoring (shared graph, per-nous vector scoping)
+- Recollection-as-memory: every recall creates association trace — self-improving retrieval
 
-**Embeddings:** fastembed-rs. Same models. Same ONNX engine. Local, HIPAA-safe.
+**Embeddings:** `EmbeddingProvider` trait. Default: fastembed-rs (local ONNX). Optional: Voyage-4-large via HTTP API. Per-instance config.
 
-**Memory topology is unchanged:** per-nous at vector level (Qdrant agent_id), shared at graph level (Neo4j, no agent_id).
+**Memory topology preserved:** Per-nous scoping at vector level (stored relation with `nous_id`), shared at graph level. Same logical model, unified physical model.
+
+**CozoDB risk mitigation:** Single maintainer, pre-1.0. `StorageProvider` trait boundary — swap to rusqlite+custom graph if needed. Fork if project dies (Rust, we can maintain it).
 
 ---
 
@@ -255,7 +275,7 @@ All deployment-specific state lives under a single `instance/` directory (gitign
 | 1 | `instance/shared/` | All nous | Default config, shared tools, skills, hooks |
 | 2 | `instance/nous/{id}/` | Individual nous | SOUL.md, MNEME.md, memory/, nous-specific tools |
 
-Plus: `instance/config/` (deployment), `instance/data/` (SQLite, Qdrant), `instance/signal/`, `instance/logs/`.
+Plus: `instance/config/` (deployment), `instance/data/` (SQLite, CozoDB), `instance/signal/`, `instance/logs/`.
 
 **taxis::oikos** is the sole authority for all instance paths. Every crate that needs state goes through it. One env var (`ALETHEIA_INSTANCE`) relocates everything. Resolution walks nous → shared → theke (most specific first).
 
@@ -269,9 +289,9 @@ The scaffold template (`instance.example/`, tracked) defines the structure. `ale
 
 - **Gnomon naming:** koina, taxis, mneme, hermeneus, organon, nous, semeion, pylon, prostheke, dianoia, daemon, symbolon, agora, autarkeia. Names are the design.
 - **Agent workspace files:** SOUL.md, TELOS.md, MNEME.md, IDENTITY.md, TOOLS.md, CONTEXT.md, PROSOCHE.md, EVAL_FEEDBACK.md, STRATEGY.md — same files, now under `instance/nous/{id}/` (Spec 44). USER.md and AGENTS.md move to `instance/theke/` (shared, one canonical copy).
-- **aletheia.yaml schema:** Same fields, serde instead of Zod. Config moves to `instance/config/` (Spec 44).
+- **aletheia.yaml schema:** Same fields, figment cascade (YAML + env + CLI) instead of Zod. Config moves to `instance/config/` (Spec 44).
 - **HTTP/SSE API surface:** Same endpoints, same event format. Svelte UI and TUI work without modification.
-- **Qdrant + Neo4j:** Correct databases. Kept. Connected correctly (once, not per-request).
+- **CozoDB:** Unified embedded store replaces Qdrant + Neo4j. Same logical model (per-nous vectors, shared graph), unified physical model. Zero external services.
 - **signal-cli binary:** JVM process unchanged. Rust rewrites the glue.
 - **6-cycle self-improvement loop:** Evolution cron, competence model, skill extraction, EVAL_FEEDBACK, distillation, sleep consolidation — all preserved, now per-nous rather than global.
 
@@ -286,7 +306,7 @@ TS runtime and Rust rewrite run in parallel. Cutover when Rust passes the adapte
 | 1 | koina | Error types, tracing, safe wrappers, fs utils |
 | 2 | taxis | serde schema, oikos path resolution, config cascade, secret resolver |
 | 3 | hermeneus (partial) | Anthropic streaming client: tool use, thinking, caching |
-| 4 | mneme | Merged memory: Qdrant + Neo4j + fastembed-rs + extraction loop |
+| 4 | mneme | Unified memory: CozoDB (vectors + graph + relations) + EmbeddingProvider trait + extraction loop |
 | 5 | organon | Tool registry + all built-in tools |
 | 6 | hermeneus (complete) | Multi-credential routing, OAuth refresh |
 | 7 | nous | NousActor model, 6-stage pipeline, bootstrap assembly, streaming state machine |
@@ -313,7 +333,7 @@ aletheia init   # scaffolds instance/ from instance.example/, prompts for secret
 systemctl enable --now aletheia
 ```
 
-~10–15MB static binary. Replaces: 1.2MB bundle + ~50MB Node.js + 254 npm packages + Python venv + uvicorn. Qdrant and Neo4j remain as containers — correct tools, connected correctly. All state under `instance/` (Spec 44).
+~10–15MB static binary. Replaces: 1.2MB bundle + ~50MB Node.js + 254 npm packages + Python venv + uvicorn + Qdrant container + Neo4j container. CozoDB is embedded — zero external service dependencies beyond signal-cli JVM. All state under `instance/` (Spec 44).
 
 ---
 
@@ -325,6 +345,6 @@ Informed by: #349
 
 ---
 
-## Open Question
+## Resolved: Browser Tool
 
-**Browser tool:** No Rust playwright equivalent. Options: (a) CDP wrapper around spawned Chromium, (b) accept reduced capability, (c) external process via JSON-RPC. Decide at phase 5 (organon).
+**Decision (2026-02-28):** `chromiumoxide` CDP wrapper around spawned Chromium with indexed DOM approach. Present interactive elements as numbered list with constrained action vocabulary. Implemented in M2.1 (organon::browser).

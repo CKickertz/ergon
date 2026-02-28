@@ -2,7 +2,7 @@
 
 > The single source of truth for Aletheia's evolution from TypeScript prototype to Rust production system.
 > Every spec, issue, idea, and design decision consolidated here.
-> Last updated: 2026-02-28 — all 20 grey areas resolved, lessons learned added
+> Last updated: 2026-02-28 — QA audit integrated (docs 01–03), CozoDB decision, snafu error layering, 20 grey areas resolved
 
 ---
 
@@ -11,9 +11,10 @@
 Aletheia is a distributed cognition system — a team of AI agents (nous) that operate as cognitive extensions of their human operator. Always-on, Signal-native, self-improving. The current TypeScript + Python implementation works but carries inherited decisions from its OpenClaw fork lineage. This project is a clean rewrite in Rust with full hindsight, driven by four pressures:
 
 1. **Single static binary** — `scp + systemctl`. No Node, no Python venv, no npm, no bundling.
-2. **True parallelism** — Multiple nous run simultaneously on Tokio threads, not interleaved on one event loop.
-3. **No inherited debt** — Every decision deliberate, nothing carried forward unexamined.
-4. **Correct primitives** — No event loop blocking, no GC pauses, no per-request DB connections.
+2. **Portable by default** — Runs on any Linux (Ubuntu, Fedora, NixOS, Alpine) and macOS. No OS-specific dependencies in the core.
+3. **True parallelism** — Multiple nous run simultaneously on Tokio threads, not interleaved on one event loop.
+4. **No inherited debt** — Every decision deliberate, nothing carried forward unexamined.
+5. **Correct primitives** — No event loop blocking, no GC pauses, no per-request DB connections.
 
 The home deployment (Syn, Akron, Syl, Demiurge) is the core use case. The always-on ambient model — Signal-native, independent routines, family access, autonomous background cycles — shapes every design decision.
 
@@ -27,7 +28,11 @@ The home deployment (Syn, Akron, Syl, Demiurge) is the core use case. The always
 aletheia
 ├── koina         — errors, tracing, safe wrappers, fs utils
 ├── taxis         — config, path resolution, oikos hierarchy, secret refs
-├── mneme         — merged memory (Qdrant + Neo4j + fastembed-rs + extraction)
+├── mneme         — unified memory (CozoDB embedded + fastembed-rs + extraction)
+│   ├── store     — CozoDB: vectors, graph, relations, bi-temporal facts — single embedded DB
+│   ├── embed     — EmbeddingProvider trait: fastembed-rs (local default) | HTTP API (Voyage, optional)
+│   ├── extract   — LLM-driven fact extraction, entity resolution, contradiction detection
+│   └── recall    — hybrid retrieval (vector + graph + BM25), MMR diversity, recollection-as-memory
 ├── hermeneus     — Anthropic client, model routing, credentials, provider trait
 ├── organon       — tool registry + built-in tools
 ├── nous          — agent pipeline, bootstrap, recall, finalize, actor model
@@ -89,8 +94,7 @@ aletheia/                          # git root — the platform
 │   │
 │   ├── data/                     # Runtime stores
 │   │   ├── sessions.db
-│   │   ├── qdrant/
-│   │   └── neo4j/
+│   │   └── cozo/                 #   CozoDB persistent storage (embedded)
 │   │
 │   └── signal/                   # signal-cli data
 │
@@ -106,20 +110,93 @@ Three-tier cascading resolution: nous/{id} → shared → theke. Most specific w
 | Language | Rust | TypeScript + Python | No GC, single binary, true concurrency |
 | Async | Tokio | Node.js event loop | Real threads, Axum built on it |
 | HTTP | Axum | Hono | SSE built-in, cleaner middleware |
-| Anthropic API | Own client (~400 LOC) | @anthropic-ai/sdk | Stable API, reqwest + SSE |
-| Vectors | qdrant-client | mem0 → Qdrant | First-party Rust client |
-| Graph | neo4rs | mem0 → Neo4j | Adequate for Cypher |
-| Embeddings | fastembed-rs | Python fastembed | Same team, ONNX, local |
+| HTTP client | reqwest | node-fetch | Async, connection pooling, Anthropic + channel calls |
+| Anthropic API | Own client (~600 LOC) | @anthropic-ai/sdk | Stable API, reqwest + SSE, adaptive thinking, Tool Search Tool |
+| Unified store | cozo (CozoDB) | Qdrant + Neo4j | Rust-native embedded, Datalog, HNSW vectors + graph + relations in one DB. Zero external services. `StorageProvider` trait boundary for risk mitigation. |
+| Embeddings | fastembed-rs + `EmbeddingProvider` trait | Python fastembed | Default: local ONNX (nomic-embed-text-v1.5). Optional: Voyage-4-large via HTTP API. Per-instance config. |
 | Memory | Direct (no abstraction) | mem0 | ~50 LOC replaces the library |
 | Sessions | rusqlite + bundled | better-sqlite3 | WAL mode, no native addon |
-| Config | serde + validator | Zod | Gold standard |
-| Errors | thiserror enums | AletheiaError hierarchy | Compile-time exhaustive match |
-| Logging | tracing | tslog | Spans, layers, OpenTelemetry |
+| Encryption | XChaCha20Poly1305 | None (plaintext) | Per-message encryption at rest, ~700ns overhead, zero plaintext on disk |
+| Config | figment + serde + validator | Zod | figment handles oikos cascade natively (YAML + env + CLI, hierarchical merge). By Rocket author. |
+| IDs | ulid + uuid | uuid | ulid for time-sorted data (sessions, messages, memories) — lexicographic sort = natural CozoDB ordering. uuid v4 for non-temporal. |
+| Errors | snafu + anyhow + miette | AletheiaError hierarchy | snafu for library/mid-level enums (context wrapping, Location-based virtual stack traces, multiple variants from same source type — GreptimeDB pattern). anyhow for application entry. miette for diagnostics. |
+| Logging | tracing + Langfuse | tslog | Spans, layers, OpenTelemetry. Langfuse for LLM-specific traces. |
 | CLI | clap | Commander | Compile-time validation |
-| Event bus | tokio::sync::broadcast | EventEmitter | Typed, backpressure-aware |
+| JSON | sonic-rs | serde_json | SIMD-accelerated, 2-3x faster parse/serialize |
+| Hashing | blake3 + foldhash | crypto.createHash / ahash | blake3 for content hashing (dedup, loop detection). foldhash for HashMap keys. |
+| Secrets | secrecy | None | `SecretString` / `SecretVec` — zeroizes on drop, redacts in Debug |
+| Hot reload | arc-swap + notify | SIGUSR1 | arc-swap for zero-downtime config swap. notify for file watching. |
+| Strings | compact_str | String | 24-byte inline for short strings (agent names, tool names, domain tags) |
+| Enums | strum | None | Derive Display, EnumString, EnumIter for all typed enums |
+| Git | gix | simple-git (npm) | Rust-native git for workspace auto-commit. No subprocess. |
+| Password | argon2 | bcrypt | Password hashing for symbolon. Memory-hard. |
+| Cron | cron + jiff | cron (npm) + luxon | cron for schedule parsing. jiff for time/date (by BurntSushi). |
+| Concurrent maps | papaya | DashMap | Lock-free, better scaling under contention |
+| Seccomp | extrasafe | None | Declarative syscall filtering for sandboxed tools |
+| HTML | dom_smoothie | scraper | Readability extraction + HTML→Markdown, single pass |
+| Browser | chromiumoxide | None | CDP wrapper for headless Chromium, indexed DOM |
+| Event bus | tokio::sync::broadcast | EventEmitter | Typed, backpressure-aware. `watch` for latest-value status. |
 | Plugins | WASM (wasmtime) | Dynamic JS import() | Sandboxed, portable, any-language |
-| MCP | rmcp v0.17 | @modelcontextprotocol/sdk | Official Rust SDK |
+| MCP | rmcp (pin version) | @modelcontextprotocol/sdk | Pre-1.0 — pin exact, wrap in trait |
+| Testing | bolero + proptest + cargo-llvm-cov | vitest | Unified fuzz/property/coverage |
 | UI | Svelte 5 (unchanged) | — | No reason to change |
+
+### Dependency Policy
+
+**~55 direct crates** across the workspace. Each crate uses 5–15. Lean for the scope.
+
+**Pinning rules:**
+- **Unstable crates** (pre-1.0, aggressive releases): pin exact version. Wrap in trait.
+  - `wasmtime` — monthly major versions. Pin exact.
+  - `rmcp` — 5 minor releases in 6 weeks. Pin exact. `McpProvider` trait.
+  - `cozo` — pre-1.0, single maintainer. Pin exact. `StorageProvider` trait boundary.
+  - `fastembed` — active development. Pin minor.
+  - `chromiumoxide` — niche. Pin exact.
+- **Stable crates** (1.0+): pin minor (`"1.49"` not `"=1.49.0"`).
+- **Never vendor** unless forced by platform issues. Cargo.lock suffices.
+
+**Corrections from audit:**
+- `serde_yaml` is deprecated — use `serde_yml` (maintained fork)
+- `async-trait` crate is unnecessary — use native `async fn in trait` (Rust 1.75+)
+- `thiserror` replaced by `snafu` for library crates (GreptimeDB pattern)
+
+**Cross-compilation notes:**
+- `fastembed` (ONNX): may need special builds for aarch64. Feature-gate behind `embed-local`.
+- `sonic-rs` (SIMD): aarch64 NEON supported but verify. Fallback to `serde_json` via feature flag.
+- `chromiumoxide`: requires Chromium on host. Feature-gate behind `browser`.
+- `extrasafe` (seccomp): Linux-only. Feature-gate behind `sandbox-seccomp`.
+
+### Crate-to-Module Mapping
+
+| Crate | Key Dependencies |
+|-------|-----------------|
+| **koina** | snafu, tracing, tracing-subscriber, miette |
+| **taxis** | koina, figment, serde, serde_yml, validator, secrecy, dirs |
+| **mneme** | koina, taxis, cozo, fastembed, reqwest (HTTP embedding), ulid, blake3 |
+| **hermeneus** | koina, taxis, reqwest, reqwest-eventsource, sonic-rs, tokio, secrecy |
+| **organon** | koina, taxis, hermeneus, tokio, gix, extrasafe, chromiumoxide |
+| **nous** | koina, taxis, mneme, hermeneus, organon, melete, tokio, ulid, compact_str |
+| **dianoia** | koina, taxis, mneme, hermeneus, nous, rusqlite |
+| **pylon** | koina, taxis, nous, axum, tower, tower-http, symbolon, sonic-rs, chacha20poly1305 |
+| **symbolon** | koina, taxis, rusqlite, jsonwebtoken, argon2 |
+| **agora** | koina, taxis, nous, tokio (semeion: tokio::process, slack: tokio-tungstenite) |
+| **daemon** | koina, taxis, nous, mneme, cron, notify, arc-swap |
+| **melete** | koina, taxis, mneme, hermeneus, nous |
+| **prostheke** | koina, taxis, wasmtime |
+| **autarkeia** | koina, taxis, mneme, nous, flate2 |
+
+### Release Profile
+
+```toml
+[profile.release]
+strip = true
+lto = "thin"
+opt-level = "z"    # optimize for size — single static binary
+codegen-units = 1
+
+[profile.dev.package."*"]
+opt-level = 2      # optimize deps even in dev — faster iteration
+```
 
 ---
 
@@ -133,7 +210,7 @@ Three-tier cascading resolution: nous/{id} → shared → theke. Most specific w
 |-------|-----------|----------------|
 | 0.1 | Oikos structure (TS) | Create `instance/` layout, migrate current deployment, validate design |
 | 0.2 | `koina` | Error types, tracing, safe wrappers compile and test |
-| 0.3 | `taxis` | serde config schema, oikos 3-tier path resolution, SecretRef resolver |
+| 0.3 | `taxis` | figment-based config cascade (nous → shared → theke), oikos 3-tier path resolution, SecretRef resolver |
 | 0.4 | Oikos tool resolution (TS) | Tools discovered by cascade — drop YAML, it's a tool |
 | 0.5 | Oikos context assembly (TS) | Bootstrap reads from cascade, no hardcoded file lists |
 | 0.6 | Oikos config cascade (TS) | `defaults.yaml` + per-nous `overrides.yaml`, deep merge |
@@ -150,10 +227,11 @@ Three-tier cascading resolution: nous/{id} → shared → theke. Most specific w
 
 | Phase | Crate | What It Proves |
 |-------|-------|----------------|
-| 1.1 | `hermeneus` (partial) | Anthropic streaming: tool use, thinking blocks, prompt caching |
-| 1.2 | `mneme` | Qdrant + Neo4j + fastembed-rs + extraction loop — merged, no sidecar |
-| 1.3 | Embedding pipeline | JEPA-informed: embed once at pipeline entry, reuse for shift detection, recall, classification |
-| 1.4 | `hermeneus` (complete) | Multi-credential routing, OAuth auto-refresh, provider trait |
+| 1.1 | `hermeneus` (partial) | Anthropic streaming: tool use, adaptive thinking (effort param), prompt caching (two-breakpoint), Tool Search Tool |
+| 1.2 | `mneme` (CozoDB) | Unified embedded store: HNSW vectors + graph + relations + bi-temporal facts — single DB, zero external services |
+| 1.3 | `mneme` (embedding) | `EmbeddingProvider` trait: fastembed-rs local default, optional Voyage-4-large. JEPA-informed: embed once, reuse for shift detection, recall, classification |
+| 1.4 | `mneme` (recall) | Hybrid retrieval (vector + graph + BM25), MMR diversity, temporal decay, recollection-as-memory |
+| 1.5 | `hermeneus` (complete) | Multi-credential routing, OAuth auto-refresh, `trait LlmProvider`, token counting |
 
 **Absorbed ideas:**
 - **Spec 27 (Embedding Space Intelligence):** Semantic shift detection, embedding-space similarity (replacing Jaccard), predictive context assembly. The mneme crate implements these natively rather than bolting them onto text heuristics.
@@ -185,9 +263,22 @@ Three-tier cascading resolution: nous/{id} → shared → theke. Most specific w
 - **Spec 42, Gap 4 (Epistemic Confidence):** Behavioral norm in AGENTS.md template — `[verified]`, `[inferred]`, `[assumed]` markers. No code dependency.
 - **Issue #338 (Coding tool quality):** Per-call `cwd` parameter, per-nous `workingDir` config via oikos cascade, 120s default timeout, glob tool.
 
-**Success criteria:** One nous (Syn) can handle a full conversation: receive message → assemble context → recall memories → stream response → extract facts → distill when needed.
+**Actor model critical pitfalls (from QA doc 03, must address in M2.2):**
+1. **Channel sizing** — bounded channels with backpressure. Unbounded = memory leak. Default: 32, tune empirically.
+2. **Shutdown signaling** — when all `NousHandle` clones drop, mpsc closes and actor exits. No separate shutdown unless cleanup needed.
+3. **Backpressure** — actor can't keep up → `send()` blocks (bounded) or caller handles `TrySendError::Full`. Never silently drop messages.
+4. **Task spawning** — spawned tasks outlive the actor. Use `JoinHandle` tracking or `CancellationToken`.
+5. **State ownership** — actor owns ALL mutable state. Handle is a thin `mpsc::Sender` wrapper. No `Arc<Mutex<_>>` between them.
 
-**Exit gate:** Rust pipeline produces functionally equivalent responses to TS pipeline for a set of 20 reference conversations.
+**Cancellation safety constraints (from QA doc 03 §3):**
+- Cancel-SAFE: `sleep()`, `Receiver::recv()`, `Sender::reserve()`, reads into owned buffers
+- Cancel-UNSAFE: `Sender::send(msg)` (message lost), `write_all()` (partial write), mutex guard across `.await`
+- All `select!` branches must be cancel-safe or use reserve-then-send pattern
+- Spawn request handlers as tasks, not inline futures, so disconnection doesn't cancel processing
+
+**Success criteria:** One nous (Syn) can handle a full conversation: receive message → assemble context → recall memories → stream response → extract facts → distill when needed. All quality features (circuit breakers, loop detection, narration filtering) operational.
+
+**Exit gate:** Rust pipeline produces functionally equivalent responses to TS pipeline for a set of 20 reference conversations. Token usage per turn measurably lower than TS baseline.
 
 ---
 
@@ -296,10 +387,10 @@ Known-wrong patterns do not carry forward: per-request DB connections, `execSync
 
 | Rule | Detail |
 |------|--------|
-| **Error handling** | `thiserror` enums per crate. No `unwrap()` in library code. `anyhow` only in CLI entry points. |
-| **Async** | All I/O is async (Tokio). No `block_on` inside async context. |
-| **Logging** | `tracing` with structured spans. `#[instrument]` on public functions. |
-| **Config** | `serde` + `validator`. All config is declarative YAML, validated at load. |
+| **Error handling** | `snafu` enums per crate with `.context()` propagation and `Location` tracking (virtual stack traces). No `unwrap()` in library code. `anyhow` only in CLI entry points. Convention: `source` field = internal error (walk chain), `error` field = external (stop walking). Log where HANDLED, not where they occur. |
+| **Async** | All I/O is async (Tokio). No `block_on` inside async context. Document cancellation safety for every public async method. In `select!`: reserve-then-send, cursor-tracked writes, never hold mutex guards across `.await`. |
+| **Logging** | `tracing` with structured spans. `#[instrument]` on public functions. Spawned tasks MUST propagate spans via `.instrument()` or `.in_current_span()`. Never hold `span.enter()` across `.await`. |
+| **Config** | `figment` for hierarchical cascade (YAML + env + CLI) + `validator` for constraints. All config declarative YAML, validated at load. |
 | **Testing** | Unit tests in same file (`#[cfg(test)]`). Integration tests in `tests/`. Property tests for serialization roundtrips. |
 | **Dependencies** | Minimal. Prefer std when adequate. Each new dependency must justify itself. |
 | **Naming** | Gnomon system. Crate names = module names from architecture. |
@@ -573,3 +664,30 @@ Progress updates go here as milestones complete. Daily work tracked in `memory/Y
 | `docs/specs/44_oikos.md` | Detailed oikos spec (directory structure, resolution rules, migration plan) |
 | `docs/specs/40_testing-strategy.md` | Testing targets and patterns |
 | `docs/specs/41_observability.md` | Logging, metrics, traces architecture |
+
+### QA Research (2026-02-28)
+
+18 parallel research agents, 3 rounds. Findings integrated into this plan. Raw docs preserved for implementation reference.
+
+| Document | Purpose | Key Value |
+|----------|---------|-----------|
+| `docs/rust-qa/01_PROJECT-QA.md` | Gap analysis, design review | 30 design items, 19 unaccounted features — **all integrated above** |
+| `docs/rust-qa/02_crates-audit.md` | 1,022 crates analyzed, 142 relevant | Workspace Cargo.toml template, crate-per-module mapping, cross-compilation notes |
+| `docs/rust-qa/03_rust-agent-references.md` | 22-section implementation guide | Feed §1–4, §6–7, §10, §22 to coding agents. **Key integrations:** snafu error layering, cancellation safety, actor pitfalls, reference repos. |
+| `docs/rust-qa/04_rust-agent-pitfalls.md` | 53 pitfall entries by category | Context window material — Rust 2024 edition, async pitfalls, AI agent anti-patterns |
+| `docs/rust-qa/05_PROJECT-QA-RESEARCH.md` | Raw research from all agents | Cognitive architecture research, Dianoia audit, GSD analysis (11 patterns) |
+| `docs/rust-qa/06_STANDARDS.md` | Unified Rust code standards | Replaces STANDARDS.md for Rust codebase. Typestate, allocation, unsafe policy, lint config. |
+
+### Reference Repositories (from QA doc 03 §21)
+
+Architecture-similar open source Rust projects. Study for patterns, not to copy.
+
+| Repository | Relevance | Key Patterns to Study |
+|-----------|-----------|----------------------|
+| [qdrant/qdrant](https://github.com/qdrant/qdrant) | **Closest architectural match** — vector DB, Axum, Tokio, multi-crate workspace | Actor model, storage engine, API design |
+| [quickwit-oss/quickwit](https://github.com/quickwit-oss/quickwit) | **Best actor model reference** — custom actor framework on Tokio | Pipeline architecture, actor lifecycle, message routing |
+| [rust-lang/rust-analyzer](https://github.com/rust-lang/rust-analyzer) | **Best workspace organization** — 30+ flat crates | Incremental computation, crate dependency graph |
+| [cozodb/cozo](https://github.com/cozodb/cozo) | Our embedded DB | Datalog engine internals, Rust API, storage backends |
+| [tokio-rs/axum](https://github.com/tokio-rs/axum) | Our HTTP framework | SSE, WebSocket, state extraction, middleware, testing |
+| [greptime/greptimedb](https://github.com/GreptimeTeam/greptimedb) | **Error handling model** — snafu + Location traces | Large workspace error layering pattern we're adopting |
+| [influxdata/influxdb](https://github.com/influxdata/influxdb) | Large async workspace | Query engine, Arrow integration, async patterns at scale |
