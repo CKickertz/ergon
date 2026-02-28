@@ -394,6 +394,9 @@ Known-wrong patterns do not carry forward: per-request DB connections, `execSync
 | **Testing** | Unit tests in same file (`#[cfg(test)]`). Integration tests in `tests/`. Property tests for serialization roundtrips. |
 | **Dependencies** | Minimal. Prefer std when adequate. Each new dependency must justify itself. |
 | **Naming** | Gnomon system. Crate names = module names from architecture. |
+| **Newtypes** | Domain IDs (`AgentId`, `SessionId`, `NousId`, `TurnId`, `ToolName`) are newtype wrappers, not bare `String`/`u64`. Zero-cost, compile-time safety against parameter swaps. |
+| **Enums** | `#[non_exhaustive]` on all public enums that may grow. `#[expect(lint)]` over `#[allow(lint)]` (2024 edition — warns when suppression is no longer needed). `#[diagnostic::on_unimplemented]` on public traits (Tool, ChannelProvider, LlmProvider, StorageProvider) for clear error messages. |
+| **Typestate** | Use typestate pattern for multi-step builders and connection lifecycle (e.g. `Connection<Disconnected>` → `Connection<Connected>`). Compile-time state validation over runtime checks. |
 | **Unsafe** | Prohibited unless reviewed and documented. Zero unsafe in application code. |
 | **Clippy** | `#[deny(clippy::all)]`. No suppression without comment. |
 
@@ -674,7 +677,7 @@ Progress updates go here as milestones complete. Daily work tracked in `memory/Y
 | `docs/rust-qa/01_PROJECT-QA.md` | Gap analysis, design review | 30 design items, 19 unaccounted features — **all integrated above** |
 | `docs/rust-qa/02_crates-audit.md` | 1,022 crates analyzed, 142 relevant | Workspace Cargo.toml template, crate-per-module mapping, cross-compilation notes |
 | `docs/rust-qa/03_rust-agent-references.md` | 22-section implementation guide | Feed §1–4, §6–7, §10, §22 to coding agents. **Key integrations:** snafu error layering, cancellation safety, actor pitfalls, reference repos. |
-| `docs/rust-qa/04_rust-agent-pitfalls.md` | 53 pitfall entries by category | Context window material — Rust 2024 edition, async pitfalls, AI agent anti-patterns |
+| `docs/rust-qa/04_rust-agent-pitfalls.md` | 53 pitfall entries by category | Context window material for coding agents. **Key integrations:** newtypes, `#[non_exhaustive]`, typestate, `#[expect(lint)]`, `#[diagnostic::on_unimplemented]` → implementation standards. Feed full doc to coding agents alongside doc 03. Note: quick ref table says thiserror — we use snafu. |
 | `docs/rust-qa/05_PROJECT-QA-RESEARCH.md` | Raw research from all agents | Cognitive architecture research, Dianoia audit, GSD analysis (11 patterns) |
 | `docs/rust-qa/06_STANDARDS.md` | Unified Rust code standards | Replaces STANDARDS.md for Rust codebase. Typestate, allocation, unsafe policy, lint config. |
 
