@@ -479,3 +479,17 @@ Same layered import rules as TypeScript. `koina` imports nothing. `taxis` import
 Crate names follow gnomon naming system. See `docs/gnomon.md`.
 
 See: docs/ARCHITECTURE.md#dependency-rules
+
+---
+
+## Performance Patterns
+
+Known optimization opportunities from TS codebase analysis. Apply when implementing the equivalent Rust module.
+
+- **Prepared statements** — `rusqlite::CachedStatement` for all session queries. TS recompiles SQL every call.
+- **SSE broadcast** — Serialize message once, write bytes to all connected clients. Don't serialize per-connection.
+- **Lazy JSON deserialization** — `serde_json::value::RawValue` for fields not always needed (`workingState`, `distillationPriming`). Don't parse until accessed.
+- **Regex caching** — `LazyLock<RegexSet>` for interaction signal patterns. TS recompiles `RegExp` inside loops.
+- **Arena allocation** — `bumpalo` for per-turn transient data (tool results, intermediate parsing). Freed in bulk at turn end.
+- **File watching** — `notify` crate for bootstrap files. TS does 11 sync reads per turn; cache and recompute only on change.
+- **Batched writes** — Group tool result messages into single SQLite transaction. Don't commit per-message.
