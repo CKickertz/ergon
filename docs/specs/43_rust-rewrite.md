@@ -292,7 +292,7 @@ TS runtime and Rust rewrite run in parallel. Cutover when Rust passes the adapte
 | 7 | nous | NousActor model, 6-stage pipeline, bootstrap assembly, streaming state machine |
 | 8 | pylon + symbolon | Axum gateway, SSE, JWT auth, delivery queue, UI serving |
 | 9 | agora + semeion | ChannelProvider trait, Signal impl, Slack impl |
-| 10 | daemon | Per-nous background tasks, cron, evolution, prosoche |
+| 10 | daemon + nous routing | Per-nous background tasks, cron, evolution, prosoche. Also: cross-agent semantic routing from Spec 27 Phase 4 — message embedding vs. agent memory cluster centroids replaces config-label domain matching (G-05, decided 2026-02-28) |
 | 11 | prostheke | wasmtime host, WASM loading, lifecycle dispatch |
 | 12 | autarkeia | Agent export/import |
 | 13 | dianoia | Planning FSM, reviewed from first principles |
