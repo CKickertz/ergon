@@ -4,6 +4,7 @@ members = [
     "crates/hermeneus",
     "crates/koina",
     "crates/mneme",
+    "crates/nous",
     "crates/taxis",
 ]
 exclude = [

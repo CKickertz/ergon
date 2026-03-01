@@ -52,6 +52,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aletheia-nous"
+version = "0.1.0"
+dependencies = [
+ "aletheia-hermeneus",
+ "aletheia-koina",
+ "aletheia-mneme",
+ "aletheia-taxis",
+ "serde",
+ "serde_json",
+ "snafu",
+ "static_assertions",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "aletheia-taxis"
 version = "0.1.0"
 dependencies = [
