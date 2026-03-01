@@ -2,7 +2,7 @@
 
 > Roadmap and current status for Aletheia's evolution from TypeScript prototype to Rust production system.
 > For decisions see `docs/decisions/`, for standards see `docs/STANDARDS.md`, for triage see `docs/DISPOSITION.md`.
-> Last updated: 2026-03-02 — M0a/M0b/M1 complete, M2 core + M3.1 complete, CozoDB absorption in progress (GSD). 331 tests across 9 crates, ~14K lines Rust.
+> Last updated: 2026-03-03 — M0a/M0b/M1 complete, M2 core + M3.1 complete, CozoDB absorption in progress (GSD). 332 tests across 9 crates, ~13.4K lines Rust.
 
 ---
 
@@ -497,7 +497,7 @@ Progress updates go here as milestones complete. Daily work tracked in `memory/Y
 
 ### Current Status
 
-Last updated: 2026-03-02
+Last updated: 2026-03-03
 
 | Milestone | Status | Notes |
 |-----------|--------|-------|
@@ -506,11 +506,11 @@ Last updated: 2026-03-02
 | M1.1 | ✅ **Complete** | mneme SQLite sessions — rusqlite, WAL mode, wire-compatible with TS sessions.db. 19 tests. |
 | M1.2a | ✅ **Complete** | CozoDB validation gate — all 5 bench tests pass (relations, HNSW, graph, concurrent R/W, bi-temporal). |
 | M1.2 | ⚠️ **Types only** | Knowledge types + Datalog schema templates written. CozoDB integration **deferred** — 3 upstream bugs. See #363 for purpose-built alternative evaluation. |
-| M1.3 | ✅ **Complete** | EmbeddingProvider trait + MockEmbeddingProvider. fastembed-rs integration pending. 8 tests. |
+| M1.3 | ✅ **Complete** | EmbeddingProvider trait + MockEmbeddingProvider + FastEmbedProvider (BAAI/bge-small-en-v1.5, feature-gated). 85 mneme tests. PR #374. |
 | M1.4 | ✅ **Complete** | 6-factor recall scoring engine — vector similarity, recency, relevance, epistemic tier, graph proximity, access frequency. 22 tests. |
 | M1.5 | ✅ **Complete** | hermeneus LLM provider trait — CompletionRequest/Response, ToolUse/ToolResult, ThinkingConfig, ProviderRegistry. 13 tests. |
 | M1.6 | ✅ **Complete** | hermeneus Anthropic Messages API — streaming SSE parser, retry w/ backoff + jitter, rate-limit Retry-After, thinking + tool_use blocks. 17 tests. PR #367. |
-| M2.1a | ✅ **Complete** | organon tool registry — ToolDef, InputSchema, ToolExecutor trait, ToolRegistry with category filtering + hermeneus wire conversion. 6 built-in stubs. 11 tests. PR #366. |
+| M2.1a | ✅ **Complete** | organon tool registry — ToolDef, InputSchema, ToolExecutor trait, ToolRegistry + 4 workspace executors (read/write/edit/exec) with path traversal protection. 14 tests. PRs #366, #375. |
 | M2.1b | ✅ **Complete** | nous pipeline skeleton — SessionState, SessionManager, PipelineContext, LoopDetector, GuardResult, TurnResult. 18 tests. |
 | M2.1c | ✅ **Complete** | CozoDB absorption analysis — research doc: module deps, FTS feasibility, graph algo inventory, 42 unsafe sites, integration plan. PR #364. |
 | M2.1d | ✅ **Complete** | Test expansion — 79 new tests across koina, mneme, nous, taxis + integration tests. PR #365. |
@@ -518,13 +518,13 @@ Last updated: 2026-03-02
 | M2.3 | **Next** | CozoDB absorption — fork, patch 3 compile bugs, strip bindings + unused backends, integrate as mneme-engine. GSD in progress (prompt 05). |
 | M2.4+ | Not started | Execute stage, tool iteration, distillation, workspace files |
 | M3.1a | ✅ **Complete** | symbolon (auth) — JWT sessions (access+refresh), API keys (ale_ format, blake3), argon2id passwords, RBAC (Operator/Agent/Readonly), AuthStore (SQLite), 50 tests. PR #368. |
-| M3.1b | ✅ **Complete** | pylon (Axum gateway) — session CRUD, SSE streaming, health check, error→HTTP mapping, tower middleware, mock integration tests. PR #370. |
+| M3.1b | ✅ **Complete** | pylon (Axum gateway) — session CRUD, SSE streaming, health check, JWT auth middleware via symbolon (Bearer required except /health), claims extraction. 25 tests. PRs #370, #376. |
 | M3.2+ | Not started | agora channels (Signal, Slack), delivery reliability |
 | M4 | Not started | Blocked on M3 |
 | M5 | Not started | Blocked on M4 |
 | M6 | Backlog | Independent items, work anytime after M5 |
 
-**Totals:** 9 Rust crates (+ integration-tests + mneme-bench), 331 workspace tests, ~14,000 lines of Rust.
+**Totals:** 9 Rust crates (+ integration-tests + mneme-bench), 332 workspace tests, ~13,400 lines of Rust.
 
 ---
 

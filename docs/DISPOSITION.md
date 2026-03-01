@@ -1,7 +1,7 @@
 # Spec & Issue Disposition
 
 > Every existing spec and issue has been accounted for. This is the definitive triage record.
-> Last updated: 2026-03-02
+> Last updated: 2026-03-03
 
 ---
 
