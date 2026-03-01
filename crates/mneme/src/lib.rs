@@ -9,6 +9,7 @@ pub mod embedding;
 pub mod error;
 pub mod knowledge;
 pub mod knowledge_store;
+pub mod recall;
 #[cfg(feature = "sqlite")]
 pub mod schema;
 #[cfg(feature = "sqlite")]
