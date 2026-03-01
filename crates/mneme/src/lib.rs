@@ -9,3 +9,11 @@ pub mod error;
 pub mod schema;
 pub mod store;
 pub mod types;
+
+#[cfg(test)]
+mod assertions {
+    use static_assertions::assert_impl_all;
+    use super::store::SessionStore;
+
+    assert_impl_all!(SessionStore: Send);
+}

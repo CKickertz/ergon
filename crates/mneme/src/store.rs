@@ -6,7 +6,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 use snafu::ResultExt;
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
 
 use crate::error::{self, Result};
 use crate::schema;
@@ -60,6 +60,7 @@ impl SessionStore {
     // --- Sessions ---
 
     /// Find an active session by nous ID and session key.
+    #[instrument(skip(self))]
     pub fn find_session(&self, nous_id: &str, session_key: &str) -> Result<Option<Session>> {
         let mut stmt = self
             .conn
@@ -92,6 +93,7 @@ impl SessionStore {
     }
 
     /// Create a new session.
+    #[instrument(skip(self))]
     pub fn create_session(
         &self,
         id: &str,
@@ -206,6 +208,7 @@ impl SessionStore {
     // --- Messages ---
 
     /// Append a message to a session. Returns the sequence number.
+    #[instrument(skip(self, content))]
     pub fn append_message(
         &self,
         session_id: &str,
@@ -245,6 +248,7 @@ impl SessionStore {
     }
 
     /// Get message history for a session.
+    #[instrument(skip(self))]
     pub fn get_history(&self, session_id: &str, limit: Option<usize>) -> Result<Vec<Message>> {
         let mut messages = Vec::new();
 
@@ -305,6 +309,7 @@ impl SessionStore {
     }
 
     /// Mark messages as distilled and recalculate session token count.
+    #[instrument(skip(self, seqs), fields(count = seqs.len()))]
     pub fn mark_messages_distilled(&self, session_id: &str, seqs: &[i64]) -> Result<()> {
         if seqs.is_empty() {
             return Ok(());

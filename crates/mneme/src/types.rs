@@ -158,3 +158,96 @@ pub struct AgentNote {
     pub content: String,
     pub created_at: String,
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_status_serde_roundtrip() {
+        for status in [SessionStatus::Active, SessionStatus::Archived, SessionStatus::Distilled] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: SessionStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back);
+        }
+    }
+
+    #[test]
+    fn session_type_serde_roundtrip() {
+        for stype in [SessionType::Primary, SessionType::Background, SessionType::Ephemeral] {
+            let json = serde_json::to_string(&stype).unwrap();
+            let back: SessionType = serde_json::from_str(&json).unwrap();
+            assert_eq!(stype, back);
+        }
+    }
+
+    #[test]
+    fn role_serde_roundtrip() {
+        for role in [Role::System, Role::User, Role::Assistant, Role::ToolResult] {
+            let json = serde_json::to_string(&role).unwrap();
+            let back: Role = serde_json::from_str(&json).unwrap();
+            assert_eq!(role, back);
+        }
+    }
+
+    #[test]
+    fn session_type_from_key() {
+        assert_eq!(SessionType::from_key("main"), SessionType::Primary);
+        assert_eq!(SessionType::from_key("prosoche-wake"), SessionType::Background);
+        assert_eq!(SessionType::from_key("ask:demiurge"), SessionType::Ephemeral);
+        assert_eq!(SessionType::from_key("spawn:coder"), SessionType::Ephemeral);
+        assert_eq!(SessionType::from_key("dispatch:task"), SessionType::Ephemeral);
+        assert_eq!(SessionType::from_key("ephemeral:one-off"), SessionType::Ephemeral);
+        assert_eq!(SessionType::from_key("signal-group"), SessionType::Primary);
+    }
+
+    #[test]
+    fn session_serde_roundtrip() {
+        let session = Session {
+            id: "ses-123".to_owned(),
+            nous_id: "syn".to_owned(),
+            session_key: "main".to_owned(),
+            parent_session_id: None,
+            status: SessionStatus::Active,
+            model: Some("claude-opus-4-20250514".to_owned()),
+            token_count_estimate: 5000,
+            message_count: 12,
+            last_input_tokens: 2000,
+            bootstrap_hash: Some("abc123".to_owned()),
+            distillation_count: 2,
+            session_type: SessionType::Primary,
+            last_distilled_at: None,
+            computed_context_tokens: 3000,
+            thread_id: None,
+            transport: Some("signal".to_owned()),
+            created_at: "2026-02-28T00:00:00Z".to_owned(),
+            updated_at: "2026-02-28T01:00:00Z".to_owned(),
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(session.id, back.id);
+        assert_eq!(session.status, back.status);
+        assert_eq!(session.session_type, back.session_type);
+    }
+
+    #[test]
+    fn message_serde_roundtrip() {
+        let msg = Message {
+            id: 1,
+            session_id: "ses-123".to_owned(),
+            seq: 1,
+            role: Role::Assistant,
+            content: "hello world".to_owned(),
+            tool_call_id: None,
+            tool_name: None,
+            token_estimate: 50,
+            is_distilled: false,
+            created_at: "2026-02-28T00:00:00Z".to_owned(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg.role, back.role);
+        assert_eq!(msg.content, back.content);
+    }
+}
