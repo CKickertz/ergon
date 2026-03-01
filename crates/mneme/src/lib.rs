@@ -5,6 +5,7 @@
 //!
 //! Depends on `aletheia-koina` for types and errors.
 
+pub mod embedding;
 pub mod error;
 pub mod knowledge;
 pub mod knowledge_store;
