@@ -2,7 +2,7 @@
 
 > The single source of truth for Aletheia's evolution from TypeScript prototype to Rust production system.
 > Every spec, issue, idea, and design decision consolidated here.
-> Last updated: 2026-03-01 — M0a/M0b/M1 complete, CozoDB deferred (3 upstream bugs), 118 tests across 6 crates
+> Last updated: 2026-03-02 — M0a/M0b/M1 complete, M2 core + M3.1 complete, CozoDB absorption in progress (GSD). 331 tests across 9 crates, ~14K lines Rust.
 
 ---
 
@@ -776,14 +776,17 @@ Last updated: 2026-03-02
 | M2.1b | ✅ **Complete** | nous pipeline skeleton — SessionState, SessionManager, PipelineContext, LoopDetector, GuardResult, TurnResult. 18 tests. |
 | M2.1c | ✅ **Complete** | CozoDB absorption analysis — research doc: module deps, FTS feasibility, graph algo inventory, 42 unsafe sites, integration plan. PR #364. |
 | M2.1d | ✅ **Complete** | Test expansion — 79 new tests across koina, mneme, nous, taxis + integration tests. PR #365. |
-| M2.2 | **Next** | Context bootstrap — assemble system prompt from oikos (SOUL.md, USER.md, TELOS.md), history loading with token budget, NousActor model |
-| M2.3+ | Not started | Execute stage, tool iteration, distillation, workspace files |
-| M3 | Not started | Blocked on M2 |
+| M2.2 | ✅ **Complete** | Context bootstrap — BootstrapAssembler (oikos cascade), TokenBudget (system/history/turn zones), CharEstimator, SectionPriority (Required > Important > Flexible > Optional), section-aware truncation, tool summary tiers. 14 tests. PR #369. |
+| M2.3 | **Next** | CozoDB absorption — fork, patch 3 compile bugs, strip bindings + unused backends, integrate as mneme-engine. GSD in progress (prompt 05). |
+| M2.4+ | Not started | Execute stage, tool iteration, distillation, workspace files |
+| M3.1a | ✅ **Complete** | symbolon (auth) — JWT sessions (access+refresh), API keys (ale_ format, blake3), argon2id passwords, RBAC (Operator/Agent/Readonly), AuthStore (SQLite), 50 tests. PR #368. |
+| M3.1b | ✅ **Complete** | pylon (Axum gateway) — session CRUD, SSE streaming, health check, error→HTTP mapping, tower middleware, mock integration tests. PR #370. |
+| M3.2+ | Not started | agora channels (Signal, Slack), delivery reliability |
 | M4 | Not started | Blocked on M3 |
 | M5 | Not started | Blocked on M4 |
 | M6 | Backlog | Independent items, work anytime after M5 |
 
-**Totals:** 7 Rust crates (+ integration-tests), 248 workspace tests, ~9,000 lines of Rust, clean clippy.
+**Totals:** 9 Rust crates (+ integration-tests + mneme-bench), 331 workspace tests, ~14,000 lines of Rust.
 
 ### CozoDB Decision (2026-03-02)
 
