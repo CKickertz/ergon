@@ -2,7 +2,7 @@
 
 > Roadmap and current status for Aletheia's evolution from TypeScript prototype to Rust production system.
 > For decisions see `docs/decisions/`, for standards see `docs/STANDARDS.md`, for triage see `docs/DISPOSITION.md`.
-> Last updated: 2026-03-04 — M0a/M0b/M1 complete, M2 core + M3 complete, CozoDB absorption phases 1-3 done (GSD continuing). 635 tests across 13 crates, ~21K lines Rust.
+> Last updated: 2026-03-04 — M0a/M0b/M1 complete, M2 core + M3 complete. 718 tests across 14 crates, ~21K lines Rust.
 
 ---
 
@@ -521,12 +521,15 @@ Last updated: 2026-03-04
 | M3.1a | ✅ **Complete** | symbolon (auth) — JWT sessions (access+refresh), API keys (ale_ format, blake3), argon2id passwords, RBAC (Operator/Agent/Readonly), AuthStore (SQLite), 50 tests. PR #368. |
 | M3.1b | ✅ **Complete** | pylon (Axum gateway) — session CRUD, SSE streaming, health check, JWT auth middleware via symbolon (Bearer required except /health), claims extraction. 25 tests. PRs #370, #376. |
 | M3.2 | ✅ **Complete** | agora channel registry — ChannelProvider trait, ChannelRegistry with typed routing, Signal JSON-RPC client (SignalClient), SignalProvider implementation. 19 tests. PR #380. |
-| M3.3+ | Not started | Signal inbound listener, message routing to nous, delivery reliability |
+| M3.3a | ✅ **Complete** | nous NousActor — Tokio actor model with inbox, lifecycle states (Active/Idle/Dormant), NousManager, message dispatch. 33 tests. PR #382. |
+| M3.3b | ✅ **Complete** | melete distillation — context distillation engine, compression strategies, token budget management, session continuity. 34 tests. PR #383. |
+| M3.3c | ✅ **Complete** | agora Signal listener — inbound message routing, SignalListener with JSON-RPC subscribe, message-to-nous dispatch. 41 tests. PR #384. |
+| M3.4+ | Not started | Delivery reliability, cross-nous message routing, end-to-end pipeline integration |
 | M4 | Not started | Multi-nous, roles, daemon, melete, dianoia |
 | M5 | Not started | Plugins, portability, cutover |
 | M6 | Backlog | Independent items, work anytime after M5 |
 
-**Totals:** 13 Rust crates (+ integration-tests + mneme-bench + graph-builder), 635 workspace tests, ~21,000 lines of Rust (+ 42K absorbed CozoDB in mneme-engine).
+**Totals:** 14 Rust crates (+ integration-tests + mneme-bench + graph-builder), 718 workspace tests, ~21K lines of Rust (+ 42K absorbed CozoDB in mneme-engine).
 
 ---
 
