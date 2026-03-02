@@ -308,39 +308,115 @@ Agent-writable dynamic surfaces that appear as panels within any view. A Dianoia
 
 ## Wishlist -- Things We Want Even If Hard
 
-These are ideas that may not make v1 but belong in the design space. They represent the ceiling of what this system could be.
+These are ideas that may not make v1 but belong in the design space. They represent the ceiling of what this system could be. Organized roughly by how deeply they change the interaction model.
 
-### Shared Cursor / Presence
+### Interaction Model
 
-When Cody is looking at the Projects view, agents can see "operator is viewing Phase 2." When an agent is actively executing, the workspace shows which file or tool the agent is touching. Mutual awareness of attention.
+#### Shared Cursor / Presence
 
-### Voice Notes
+When Cody is looking at the Projects view, agents can see "operator is viewing Phase 2." When an agent is actively executing, the workspace shows which file or tool the agent is touching. Mutual awareness of attention. Inspiration: multiplayer cursors in Figma, but asymmetric -- one human, many agents.
 
-Press-and-hold to record a voice note from the workspace. Transcribed and delivered to the agent as a message. The agent can respond with synthesized voice. Low-friction input when typing is too slow.
+#### Voice Notes
 
-### Ambient Mode
+Press-and-hold to record a voice note from the workspace. Transcribed and delivered to the agent as a message. The agent can respond with synthesized voice. Low-friction input when typing is too slow. We already have voice_reply in the agent toolkit -- this is the UI counterpart.
 
-A view designed to stay open on a secondary monitor. Minimal chrome, large type, auto-rotating between: active agent status, task board, cost ticker, phase progress. The workspace as a passive awareness surface -- glanceable, not interactive.
+#### Command Palette
 
-### Mobile Companion
+Cmd+K / Ctrl+K universal command palette. "Switch Syn to Opus." "Show health." "Create task: review PR #390." "Pause Demi's phase." Type a natural language command, the workspace interprets and executes. Blurs the line between UI navigation and agent instruction.
 
-Not a full mobile app -- a responsive web view optimized for phone. Check tasks, see health, toggle a model. Quick actions from the couch. The full workspace stays on the desktop.
+#### Quick Capture
 
-### Notification Bridge
+Floating button or keyboard shortcut to capture a thought without context-switching views. "Note: check if CozoDB compaction is scheduled" -- drops into an inbox that prosoche can score and route. Inspired by Things/Todoist quick-add.
 
-Workspace events (task completed, phase failed, health degraded) can optionally push to Signal or system notifications. The workspace doesn't require you to be watching it -- it reaches out when something needs attention.
+### Observability
 
-### Replay Diffing
+#### Context Window Visualizer
+
+Show the token budget breakdown for any agent's current or recent turn. System prompt: 12K tokens. History: 8K. Tools: 2K. Available for response: 78K. Stacked bar chart per turn. Helps diagnose "why did the agent forget X?" -- because it was pushed out of the window. Inspired by Langfuse's trace detail view.
+
+#### Memory Graph Explorer
+
+Interactive visualization of an agent's CozoDB knowledge graph. Nodes = entities, edges = relationships. Click a node to see its facts, provenance, and temporal history. Filter by entity type, time range, or confidence. Uses the graph surface type from Spec 43b canvas.
+
+#### Prompt Playground
+
+Select an agent, see its current system prompt fully assembled (SOUL + TELOS + MNEME + tools + prosoche + tasks). Edit it live. Run a test turn against it. See the response. Iterate. Based on Langfuse's playground concept but tightly integrated with our assembly pipeline.
+
+#### Log Stream
+
+Tail logs from any subsystem in real-time within the workspace. Filter by crate, log level, agent. Inspired by the Clawd Control activity feed, but with structured tracing spans (from our Spec 41 observability work). Click a span to expand its children.
+
+#### Infinite Loop Detection
+
+Visual indicator when an agent is stuck in a loop -- editing the same file repeatedly, retrying the same tool call, or generating similar outputs across turns. Ralph TUI's core value proposition. The workspace should surface this pattern automatically and offer a "break loop" button. We already track tool calls per session.
+
+### Control
+
+#### Tiered Model Strategy
+
+Not just per-agent model selection, but per-task-type model routing. "Use Haiku for lint fixes, Sonnet for feature work, Opus for architecture decisions." Configure tiers in the workspace, enforced by hermeneus model routing. Inspired by Ralph TUI's tiered cost strategy.
+
+#### Autonomous Run Limits
+
+When autonomous mode is ON, set iteration limits: "Work on up to 5 tasks, then stop and report." Prevents runaway autonomous sessions. Visible in agent detail as a progress bar (3/5 tasks completed this cycle).
+
+#### Scheduled Actions
+
+"At 6am tomorrow, have Demi start the test coverage expansion." "Every Monday, run a full health check and report." Cron-like scheduling from the UI that writes to daemon config. Visual calendar or timeline of upcoming scheduled actions.
+
+#### Bulk Operations
+
+Select multiple agents, apply the same model change. Select multiple tasks, reassign to a different agent. Multi-select with shift-click, batch actions toolbar. Important as the team grows beyond 4 agents.
+
+### Visualization
+
+#### Ambient Mode
+
+A view designed to stay open on a secondary monitor. Minimal chrome, large type, auto-rotating between: active agent status, task board, cost ticker, phase progress. The workspace as a passive awareness surface -- glanceable, not interactive. Think airport departure board aesthetic.
+
+#### Activity Heatmap
+
+GitHub-contribution-style heatmap showing agent activity over time. Color intensity = number of turns/tasks completed. Hover for details. Spans days/weeks/months. Shows patterns: "Demi is most active on Mondays," "Syn had a burst Wednesday evening."
+
+#### Dependency Graph View
+
+Not just Dianoia phases, but a broader view of how everything connects: specs reference issues, issues reference code, code references tests, agents own domains. A navigable graph of the entire project topology. Click any node to drill into it.
+
+### Data
+
+#### Replay Diffing
 
 Compare two session replays side by side. Same task, different models. Same agent, before and after a prompt change. See where behavior diverged. Useful for evaluating model switches and prompt engineering.
 
-### Agent Journaling
+#### Agent Journaling
 
-A read-only view of an agent's memory files, session notes, and MNEME entries. See how the agent's understanding of the world has evolved over time. The unconcealment of the agent's inner life.
+A read-only view of an agent's memory files, session notes, and MNEME entries over time. See how the agent's understanding of the world has evolved. Timeline scrubbing. The unconcealment of the agent's inner life.
 
-### Plugin Marketplace View
+#### Evaluation Snapshots
+
+Periodically snapshot agent performance on standard tasks. Track quality over time as prompts, models, and memory evolve. Inspired by Langfuse's evaluation datasets. "Is Syn getting better at PR reviews?"
+
+#### Export / Reporting
+
+Generate a PDF or markdown summary of work completed this week/month. Tasks done, cost incurred, phases advanced, sessions run. Useful for Cody's own accountability and for sharing with collaborators who don't have workspace access.
+
+### Platform
+
+#### Mobile Companion
+
+Not a full mobile app -- a responsive web view optimized for phone. Check tasks, see health, toggle a model. Quick actions from the couch. The full workspace stays on the desktop.
+
+#### Notification Bridge
+
+Workspace events (task completed, phase failed, health degraded) can optionally push to Signal or system notifications. The workspace doesn't require you to be watching it -- it reaches out when something needs attention.
+
+#### Plugin Marketplace View
 
 If prostheke (WASM plugins) matures, a view for browsing, installing, and configuring plugins. Each plugin shows its granted capabilities, resource usage, and health.
+
+#### Drag-and-Drop Workspace Customization
+
+Homarr-style widget placement. Instead of fixed view layouts, let the operator rearrange panels, resize tiles, pin favorites. Save layouts per user preference. Heavy lift but dramatically increases personalization.
 
 ---
 
@@ -451,11 +527,23 @@ Spec 43b brought into the workspace.
 
 ## References
 
+### Internal
+
 - [Spec 29 -- UI Layout & Theming](29_ui-layout-and-theming.md)
 - [Spec 30 -- Homepage Dashboard](30_homepage-dashboard.md)
+- [Spec 41 -- Observability](41_observability.md)
 - [Spec 43b -- A2UI Live Canvas](43_a2ui-canvas.md)
 - [Spec 39 -- Autonomy Gradient](archive/DECISIONS.md) (absorbed)
-- [AgentOps](https://github.com/AgentOps-AI/agentops) -- Session replay, cost tracking, agent graphs
-- [Clawd Control](https://github.com/Temaki-AI/clawd-control) -- SSE live updates, fleet health, zero-dependency UI
-- [mudrii/openclaw-dashboard](https://github.com/mudrii/openclaw-dashboard) -- SVG charts, cost trends, sub-agent trees
-- [Lattice Workbench](https://latticeruntime.com/) -- Agent IDE + monitoring, enforcement primitives
+
+### External -- Agent Dashboards + Ops
+
+- [AgentOps](https://github.com/AgentOps-AI/agentops) (5.3K stars, MIT) -- Session replay timelines, cost tracking, agent execution graphs. Open source app in `/app` directory. Best reference for session replay UI.
+- [Clawd Control](https://github.com/Temaki-AI/clawd-control) (111 stars, MIT) -- SSE live updates, fleet health tiles, agent detail drilldowns, auto-discovery. Vanilla HTML/JS + Node. Zero build step. Best reference for simple, effective health monitoring.
+- [mudrii/openclaw-dashboard](https://github.com/mudrii/openclaw-dashboard) (136 stars, MIT) -- Python + pure HTML/SVG. 11 panels: cost trends, session tracking, sub-agent hierarchy trees, cron status. Zero external dependencies.
+- [Lattice Workbench](https://latticeruntime.com/) (Apache 2.0) -- Agent IDE + operations console. Multi-model chat, real-time monitoring, cost tracking. Desktop/web/CLI/VS Code. Enforcement primitives (identity, auth, audit, constraints).
+- [Ralph TUI](https://www.verdent.ai/guides/ralph-tui-ai-agent-dashboard) -- Terminal-based agent mission control. Key ideas: iteration limits for autonomous runs, infinite loop detection, session state persistence to disk, tiered model strategy (expensive for architecture, cheap for lint). The "if you can't see what your AI is doing, you shouldn't let it touch your codebase" philosophy.
+
+### External -- LLM Engineering
+
+- [Langfuse](https://github.com/langfuse/langfuse) (22.5K stars, open source) -- LLM observability, trace visualization, prompt management + playground, evaluation datasets, cost metrics. Best reference for trace detail views and prompt iteration workflow.
+- [Homarr](https://homarr.dev/) -- Self-hosted server dashboard with drag-and-drop widget placement. Reference for customizable layout patterns.
