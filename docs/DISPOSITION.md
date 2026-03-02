@@ -24,8 +24,8 @@
 | 30 | Homepage Dashboard | M6 | Absorbed → Spec 45 | Task board and activity feed become workspace views |
 | 40 | Testing Strategy | M5 | Draft | Coverage targets adapted for cargo test |
 | 41 | Observability | M5 | Draft | tracing crate, metrics, spans |
-| 43b | A2UI Live Canvas | M6 | Integrated → Spec 45 | Canvas surfaces render within the coworking workspace |
-| 45 | Coworking Workspace | M6 | Draft | Shared operations surface -- human + agent coworking, controls, health, cost, session replay |
+| 43b | A2UI Live Canvas | M6 | Integrated → Spec 45 | Canvas surfaces render within theatron as widgets |
+| 45 | Theatron | M6 | Draft | Composable operations system -- widget engine, nous-typed views, agent-authored dashboards |
 
 ### Implemented and Archived
 

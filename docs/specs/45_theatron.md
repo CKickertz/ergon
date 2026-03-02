@@ -1,9 +1,25 @@
-# Spec 45: Coworking Workspace -- Shared Operations Surface for Human + Agents
+# Spec 45: Theatron -- Composable Operations System for Human + Agents
 
 **Status:** Draft
 **Author:** Syn
 **Date:** 2026-03-01
+**Revised:** 2026-03-01
 **Spec:** 45
+
+---
+
+## Name
+
+**Theatron** (θέατρον) -- the seeing-place. From θεάομαι (theaomai): to gaze upon, to behold, to contemplate. In antiquity, the theatron was not the stage -- it was the structure that made seeing possible. The seats, the acoustics, the sightlines. The Greeks did not build a fixed performance; they built a place where any performance could be seen.
+
+| Layer | Reading |
+|-------|---------|
+| L1 | The operations interface -- dashboards, controls, live state, agent views |
+| L2 | The connective surface between human and agents: shared visibility, mutual awareness |
+| L3 | A seeing-place -- not a thing seen but the structure that makes seeing possible. As the ancient theatron shaped what could be witnessed, this system shapes what can be known about the agents and their work |
+| L4 | The system itself is a theatron: it doesn't contain truth, it arranges the conditions for unconcealment. Every widget, every view, every data binding is a sightline cast into the system's inner life |
+
+The theatron composes naturally with the existing topology. Pylon (the gate) serves it. Prosoche (attention) feeds signals into it. Dianoia (reasoning) renders its phase graphs within it. Nous (mind) streams its state through it. The theatron doesn't think, plan, or act -- it *makes thinking, planning, and acting visible*.
 
 ---
 
@@ -25,9 +41,13 @@ Signal is a communication *method* -- a pipe. What is missing is a communication
 
 ## Vision
 
-A web-based operations workspace served by Pylon that replaces the current chat-only WebUI as the primary coworking surface. Signal remains the mobile/quick channel. The workspace is the deep-work channel.
+A web-based composable operations system served by Pylon. Not a dashboard with fixed views -- a **view composition engine** with good defaults. The operator and agents compose, customize, and share views built from a registry of typed widgets bound to live data sources.
 
-The workspace is **bidirectional**. The human sees agent state. Agents see human decisions. Toggles take effect immediately. Tasks sync in both directions. Health is always visible. Cost is always visible. The room is always lit.
+Signal remains the mobile/quick channel. Theatron is the deep-work channel.
+
+The system is **bidirectional**. The human sees agent state. Agents see human decisions. Toggles take effect immediately. Tasks sync in both directions. Health is always visible. Cost is always visible. The room is always lit.
+
+The system is **nous-aware**. Views can be typed to a specific nous, a group of nous, or shared across all. An agent's dashboard reflects its strengths, domain, and personality. Syn's view emphasizes orchestration and PR status. Demi's view emphasizes test coverage and code health. The operator composes views per-agent, per-team, or system-wide. Agents themselves can author views as work products.
 
 This is one human's personal operations center and coworking space -- not multi-tenant, not multi-user. One deployment, one operator.
 
@@ -42,9 +62,10 @@ This is one human's personal operations center and coworking space -- not multi-
 
 | Spec | Relationship |
 |------|-------------|
-| 29 (UI Layout) | Workspace supersedes current layout. Agent bar, theme, responsive design carry forward. |
-| 30 (Homepage Dashboard) | Absorbed. Task board and activity feed become workspace views. |
-| 43b (A2UI Canvas) | Integrated. Canvas surfaces render within the workspace as agent-writable panels. |
+| 29 (UI Layout) | Theatron supersedes current layout. Agent bar, theme, responsive design carry forward. |
+| 30 (Homepage Dashboard) | Absorbed. Task board and activity feed become default widgets. |
+| 43b (A2UI Canvas) | Integrated. Canvas surfaces render within theatron as agent-writable panels. |
+| 41 (Observability) | Feeds theatron. Tracing spans, structured logs, and metrics are data sources for widgets. |
 
 ---
 
@@ -52,29 +73,32 @@ This is one human's personal operations center and coworking space -- not multi-
 
 ### Principles
 
-1. **Unconcealment over reporting.** State is always visible, not fetched on demand. If prosoche is scoring, you see it. If a phase is blocked, you see it. The workspace practices aletheia.
+1. **Unconcealment over reporting.** State is always visible, not fetched on demand. If prosoche is scoring, you see it. If a phase is blocked, you see it. The theatron practices aletheia.
 
 2. **Bidirectional by default.** Every display is also a control. Agent status is visible AND the model powering it is switchable. Tasks are visible AND checkable by either party. Health is visible AND services are restartable.
 
-3. **Immediacy.** Toggles take effect now. No confirmation dialogs, no "are you sure?" The human is the operator. The workspace is a cockpit, not a wizard.
+3. **Immediacy.** Toggles take effect now. No confirmation dialogs, no "are you sure?" The human is the operator. The theatron is a cockpit, not a wizard.
 
-4. **Complementary to Signal.** Signal is the phone in your pocket. The workspace is the desk you sit at. Different postures, same system. A message sent via Signal appears in the workspace. A task created in the workspace is visible to agents in their next turn.
+4. **Complementary to Signal.** Signal is the phone in your pocket. The theatron is the desk you sit at. Different postures, same system. A message sent via Signal appears in the theatron. A task created in the theatron is visible to agents in their next turn.
 
-5. **Incremental assembly.** The workspace is a collection of views and panels, not a monolith. Each view can ship independently. The frame (navigation, SSE connection, auth) ships first, views fill in.
+5. **Composition over construction.** The theatron is not a monolith of designed views. It is a system of typed widgets, data sources, layout grids, and view definitions. Default views ship as starter templates. Every view is forkable, rearrangeable, and customizable. Agents and humans alike can compose views.
 
-### Architecture
+6. **Nous-aware by default.** Every view has a scope: global (all agents), group (a named set of agents), or individual (one nous). Widgets inherit their view's scope unless overridden. This means the same widget type -- say, "recent sessions" -- automatically shows the right data depending on whether you're in a shared dashboard or Demi's personal view.
+
+### Core Architecture
 
 ```
 Browser                          Pylon (Axum)
 ┌─────────────────┐              ┌─────────────────────────┐
 │                  │   SSE        │                         │
-│  Workspace UI    │◄────────────│  /ws/events (SSE)       │
+│  Theatron UI     │◄────────────│  /ws/events (SSE)       │
 │  (Svelte 5)      │              │                         │
-│                  │   REST       │  /api/workspace/*       │
-│                  │────────────►│    tasks, toggles,      │
-│                  │              │    health, config       │
+│                  │   REST       │  /api/theatron/*        │
+│  Widget Engine   │────────────►│    views, widgets,      │
+│  Layout Renderer │              │    tasks, toggles,      │
+│  View Store      │              │    health, config       │
 │                  │              │                         │
-│  Canvas panels   │◄────────────│  /api/canvas/* (Spec 43b)│
+│  Canvas panels   │◄────────────│  /api/canvas/* (43b)    │
 │                  │              │                         │
 └─────────────────┘              └──────────┬──────────────┘
                                             │
@@ -86,19 +110,168 @@ Browser                          Pylon (Axum)
                          tools         attention      distillation
 ```
 
-**SSE as the spine.** A single SSE connection carries all live state: agent status changes, task updates, health heartbeats, cost ticks, phase transitions, canvas surface updates. The workspace subscribes once and routes events to the appropriate view.
+**SSE as the spine.** A single SSE connection carries all live state: agent status changes, task updates, health heartbeats, cost ticks, phase transitions, canvas surface updates. The theatron subscribes once and routes events to the appropriate widgets.
 
-**REST for mutations.** Toggle a model, create a task, restart a service, change a config value. POST/PATCH endpoints that take effect immediately and emit SSE events confirming the change.
+**REST for mutations.** Toggle a model, create a task, restart a service, change a config value, save a view definition. POST/PATCH endpoints that take effect immediately and emit SSE events confirming the change.
 
-**Pylon serves everything.** Static assets (Svelte build) + API routes + SSE stream. No separate dashboard server. The workspace IS the WebUI -- same origin, same auth (symbolon), same port.
+**Pylon serves everything.** Static assets (Svelte build) + API routes + SSE stream. No separate dashboard server. The theatron IS the WebUI -- same origin, same auth (symbolon), same port.
+
+### View Composition Engine
+
+The beating heart of Theatron. Instead of hardcoded views, the system composes views from four primitives:
+
+#### 1. Widget Registry
+
+Every UI element is a self-contained, typed widget. Each widget declares:
+
+- **Type identifier.** `health-tile`, `cost-sparkline`, `task-list`, `agent-status`, `session-timeline`, `context-window-bar`, `phase-graph`, `prosoche-signals`, etc.
+- **Data source binding.** What feeds the widget. Can be one or more of:
+  - `sse:<event-type>` -- live from the SSE stream (e.g., `sse:agent.status`)
+  - `rest:<endpoint>` -- polled REST endpoint (e.g., `rest:/api/health`)
+  - `query:cozo:<relation>` -- direct CozoDB query with parameters
+  - `file:<glob>` -- watched file content (e.g., `file:memory/*.md`)
+  - `derived:<widget-id>` -- computed from another widget's output
+- **Config schema.** What the widget accepts: time range, agent filter, refresh interval, display mode, color theme.
+- **Size constraints.** Min/max grid cells (width x height). Whether the widget can be collapsed.
+- **Scope compatibility.** Which view scopes the widget supports: `global`, `group`, `nous`, or `any`.
+
+The registry mirrors the organon pattern (tool registry): same philosophy -- register typed capabilities, compose dynamically -- different domain.
+
+#### 2. View Definitions
+
+A view is a declarative document (YAML or JSON) describing:
+
+```yaml
+# Example: Syn's personal dashboard
+name: "Syn Overview"
+scope:
+  type: nous
+  nous_id: syn
+layout:
+  columns: 12
+  rows: auto
+widgets:
+  - type: agent-status
+    position: { col: 1, row: 1, width: 12, height: 1 }
+    config:
+      show_controls: true
+
+  - type: task-list
+    position: { col: 1, row: 2, width: 6, height: 4 }
+    source: { rest: "/api/tasks?assignee=syn" }
+    config:
+      show_completed: false
+
+  - type: recent-sessions
+    position: { col: 7, row: 2, width: 6, height: 4 }
+    config:
+      limit: 5
+
+  - type: prosoche-signals
+    position: { col: 1, row: 6, width: 6, height: 3 }
+    config:
+      min_score: 0.3
+
+  - type: cost-sparkline
+    position: { col: 7, row: 6, width: 6, height: 3 }
+    config:
+      window: 7d
+      group_by: model
+```
+
+View definitions are stored in taxis config, hot-reloadable via arc-swap. The 7 default views (Home, Agent Detail, Projects, Health, Cost, Replay, Chat) ship as built-in configs. The operator customizes by forking them or building from scratch.
+
+#### 3. Nous-Typed Views
+
+Views have a scope that determines whose data they show and who they're relevant to:
+
+| Scope | Sees | Example |
+|-------|------|---------|
+| `global` | All agents, system-wide data | Home dashboard, Health board, Cost cockpit |
+| `group:<name>` | Named agent group | "Infrastructure team" (Demi + Akron), "Orchestration" (Syn + Arbor) |
+| `nous:<id>` | Single agent | Syn's personal dashboard, Demi's test coverage view |
+
+**Inheritance rules:**
+- Widgets within a `nous:syn` view automatically filter data to Syn unless overridden.
+- A `group:infra` view shows aggregated data for all group members.
+- `global` views show everything, with optional per-agent drill-down.
+
+**Agent groups** are named sets defined in taxis config:
+
+```yaml
+theatron:
+  groups:
+    infrastructure:
+      name: "Infrastructure"
+      members: [demi, akron]
+      icon: "wrench"
+    orchestration:
+      name: "Orchestration"
+      members: [syn, arbor]
+      icon: "network"
+```
+
+Groups reflect operational reality: which agents collaborate on what. The theatron navigation shows groups as collapsible sections. Click "Infrastructure" to see the group dashboard. Click "Demi" within it to see Demi's personal view.
+
+**Agent personality in views.** A nous-scoped view can reflect the agent's character. Syn's dashboard might emphasize PR status, merge queues, and cross-agent coordination. Demi's might emphasize test coverage, lint warnings, and code health metrics. The operator configures this; the agent can suggest or author view definitions as work products.
+
+#### 4. Agent-Authored Views
+
+Agents don't just appear in the theatron -- they build parts of it. An agent can compose a view definition as a work output:
+
+- Demi finishes a test coverage expansion. It authors a "Coverage Report" view: test count over time chart, coverage by crate table, failing test list, and a phase progress widget. Saves it via REST API.
+- Syn completes a PR review sprint. It authors a "Review Summary" view: merged PRs table, remaining open PRs, code churn sparkline. Posts it as a session artifact.
+
+Agent-authored views are tagged with their creator and appear in a "Views by Agent" section of the navigation. The operator can adopt, fork, or discard them. This makes the theatron a collaborative artifact -- not just a tool the operator uses to watch agents, but a surface that agents actively contribute to.
+
+**View authoring API:**
+
+```
+POST /api/theatron/views
+{
+  "name": "Coverage Report",
+  "scope": { "type": "nous", "nous_id": "demi" },
+  "author": "demi",
+  "layout": { ... },
+  "widgets": [ ... ]
+}
+```
+
+#### 5. Data Source Abstraction
+
+Widgets don't know where data comes from. They bind to typed data sources:
+
+| Source Type | Protocol | Use Case |
+|-------------|----------|----------|
+| `sse:<event>` | Server-Sent Events | Live agent status, task changes, health heartbeats, phase transitions |
+| `rest:<path>` | HTTP GET (polled) | Task lists, session history, cost summaries, config values |
+| `query:cozo` | CozoDB query | Knowledge graph exploration, memory facts, relation statistics |
+| `file:<glob>` | Filesystem watch | Memory files, session notes, prosoche state |
+| `derived:<id>` | Computed | Aggregations, filters, and transforms of other sources |
+
+This abstraction means custom widgets can surface *anything* the system knows. Want a view showing all CozoDB relations with >1000 rows? Bind a table widget to a Cozo query. Want prosoche scores over time? Bind a chart to the scoring history. Want a live grep of agent session notes? Bind a text widget to a file glob.
+
+### Layout Engine
+
+Views render on a 12-column responsive grid (matching CSS grid conventions). Widgets are placed by column/row position and span. The layout engine handles:
+
+- **Drag-and-drop rearrangement.** Grab a widget, drop it elsewhere. Grid snaps.
+- **Resize handles.** Drag edges to resize within the widget's declared min/max constraints.
+- **Responsive breakpoints.** On narrow screens, columns collapse. Widgets reflow based on priority.
+- **Collapse/expand.** Any widget can be collapsed to a title bar. Remembers state.
+- **Save layout.** Changes persist to the view definition in taxis. Hot-reloaded.
+
+Inspiration: Homarr's tile placement, but with typed data bindings and nous-scoping.
 
 ---
 
-## Views
+## Default Views
+
+The theatron ships with 7 default view templates. These are the "starter kit" -- opinionated compositions of built-in widgets that cover the most common needs. Every one of them is forkable and customizable.
 
 ### 1. Home -- The Room
 
-The default view. What you see when you sit down at the desk.
+The default view. What you see when you sit down at the desk. Scope: `global`.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -130,15 +303,11 @@ The default view. What you see when you sit down at the desk.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**Components:**
-- **Task board** (from Spec 30, refined). Shared between human and agents. Either party adds, either checks off. Backed by SQLite via pylon API. Agents see their tasks injected into context.
-- **Active now**. What is happening right this moment. Drawn from SSE events: active turns, running phases, prosoche cycles, daemon crons.
-- **System health**. Heartbeat tiles for every subsystem. Green/yellow/red. Click to drill.
-- **Cost summary**. 7-day rolling cost by model. Sparkline trends. Updated per-turn.
+**Widgets:** agent-bar, greeting, task-list (global), active-now, health-summary, cost-sparkline (7d, by model).
 
 ### 2. Agent Detail
 
-Click an agent pill to see their world.
+Nous-scoped view. See and control a specific agent. Scope: `nous:<id>`.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -164,27 +333,25 @@ Click an agent pill to see their world.
 │  └─────────────────────────────────────────────────────┘    │
 │                                                              │
 │  ┌─ Attention (Prosoche) ─────────────────────────────┐     │
-│  │  Signal: "3 overdue work tasks" — score: 0.72       │     │
-│  │  Signal: "PR #385 open 2d" — score: 0.45            │     │
-│  │  Signal: "Memory approaching 80%" — score: 0.31     │     │
+│  │  Signal: "3 overdue work tasks" -- score: 0.72      │     │
+│  │  Signal: "PR #385 open 2d" -- score: 0.45           │     │
+│  │  Signal: "Memory approaching 80%" -- score: 0.31    │     │
 │  └─────────────────────────────────────────────────────┘    │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**Controls that write to taxis config (hot-reloaded via arc-swap):**
+**Widgets:** agent-status-header, agent-controls, recent-sessions, prosoche-signals, task-list (nous-scoped), cost-sparkline (nous-scoped).
+
+**Controls write to taxis config (hot-reloaded via arc-swap):**
 - **Model selector.** Dropdown: Sonnet / Opus / Haiku. Writes to agent's model config. Takes effect on next turn.
 - **Autonomous mode toggle.** When ON, agent picks up open tasks and prosoche signals without being prompted. Writes to autonomy gradient config (Spec 39).
 - **Wake on signal.** Whether prosoche wakes this agent. Toggle writes to daemon config.
 - **Prosoche cycle.** Interval slider or preset. Writes to daemon cron config.
 
-**Session replay** (inspired by AgentOps): Click a session to see a timeline of every turn, tool call, and decision. Scrub through it like a video. Data already exists in session store -- this is a read-only visualization.
-
-**Prosoche attention panel.** Live view of what this agent's prosoche is scoring. Directly surfacing the signal pipeline that is currently invisible.
-
 ### 3. Projects + Phases
 
-Dianoia execution state visualized.
+Dianoia execution state visualized. Scope: `global`.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -216,11 +383,11 @@ Dianoia execution state visualized.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Phase dependency graph. Click a phase to expand its plans. Click a plan to see the agent executing it. Verification status shown per phase. Checkpoint approvals can be given directly from this view.
+**Widgets:** phase-graph (SVG/Canvas dependency renderer), plan-list (per-phase), plan-detail (agent assignment, status). Checkpoint approvals can be given directly from this view.
 
 ### 4. Health + Services
 
-Full system health board. Expansion of the home view's summary tiles.
+Full system health board. Scope: `global`.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -262,21 +429,22 @@ Full system health board. Expansion of the home view's summary tiles.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Every tile is a subsystem. Each tile shows key metrics, last-known state, and action buttons. Actions hit pylon REST endpoints that talk to the relevant actor.
+**Widgets:** health-tile (per subsystem), daemon-cron-status, log-stream (filtered). Every tile has action buttons that hit pylon REST endpoints.
 
 ### 5. Cost Cockpit
 
-Dedicated view for token economics.
+Dedicated view for token economics. Scope: `global` with per-agent drill-down.
 
-- **Burn rate** per agent, per model, per phase, per day. Line charts.
-- **Model comparison.** Same task class, Sonnet vs Opus cost and quality. Helps inform the model toggle decision with data.
+**Widgets:**
+- **Burn rate.** Per agent, per model, per phase, per day. Line charts.
+- **Model comparison.** Same task class, Sonnet vs Opus cost and quality. Data for informing model toggle decisions.
 - **Projections.** "At current rate, this month will cost $X."
-- **Budget alerts.** Optional. Set a daily/weekly ceiling. Visual warning when approaching.
-- **Per-session cost.** How much did that conversation cost? Drill into any session.
+- **Budget alerts.** Optional ceiling per day/week. Visual warning when approaching.
+- **Per-session cost.** Click any session to see its cost breakdown by turn.
 
 ### 6. Session Replay
 
-The AgentOps-inspired feature. A timeline view of a completed (or active) session.
+AgentOps-inspired timeline view. Scope: `nous:<id>` (one session at a time).
 
 ```
 Session #s_01J8K... "PR merge and docs update"
@@ -294,15 +462,13 @@ Timeline:
 └─ 1:14  Session end (stop_reason: end_turn)
 ```
 
-Scrub the timeline. Expand any turn to see full request/response. See thinking blocks. See tool inputs and outputs. See token counts per turn. This is the "video replay" of agent work.
+**Widgets:** session-timeline (scrubbing), turn-detail (expand for full request/response), context-window-bar (token budget per turn), tool-call-detail. Active sessions support live-follow mode.
 
 ### 7. Chat
 
-The existing chat view, preserved. Click "Chat" from an agent detail page or from the agent bar. Full conversation interface. This is what Signal does in web form -- direct messaging with an agent.
+The existing pylon chat interface, now one view among many rather than the only interface. Scope: `nous:<id>`.
 
-### 8. Canvas (Spec 43b)
-
-Agent-writable dynamic surfaces that appear as panels within any view. A Dianoia phase can push a progress surface. An agent can push a metrics surface. Canvas surfaces render inline or in a collapsible side panel.
+**Widgets:** chat-history, message-input, session-selector, model-indicator.
 
 ---
 
@@ -314,15 +480,15 @@ These are ideas that may not make v1 but belong in the design space. They repres
 
 #### Shared Cursor / Presence
 
-When Cody is looking at the Projects view, agents can see "operator is viewing Phase 2." When an agent is actively executing, the workspace shows which file or tool the agent is touching. Mutual awareness of attention. Inspiration: multiplayer cursors in Figma, but asymmetric -- one human, many agents.
+When Cody is looking at the Projects view, agents can see "operator is viewing Phase 2." When an agent is actively executing, the theatron shows which file or tool the agent is touching. Mutual awareness of attention. Inspiration: multiplayer cursors in Figma, but asymmetric -- one human, many agents.
 
 #### Voice Notes
 
-Press-and-hold to record a voice note from the workspace. Transcribed and delivered to the agent as a message. The agent can respond with synthesized voice. Low-friction input when typing is too slow. We already have voice_reply in the agent toolkit -- this is the UI counterpart.
+Press-and-hold to record a voice note from the theatron. Transcribed and delivered to the agent as a message. The agent can respond with synthesized voice. Low-friction input when typing is too slow. We already have voice_reply in the agent toolkit -- this is the UI counterpart.
 
 #### Command Palette
 
-Cmd+K / Ctrl+K universal command palette. "Switch Syn to Opus." "Show health." "Create task: review PR #390." "Pause Demi's phase." Type a natural language command, the workspace interprets and executes. Blurs the line between UI navigation and agent instruction.
+Cmd+K / Ctrl+K universal command palette. "Switch Syn to Opus." "Show health." "Create task: review PR #390." "Pause Demi's phase." Type a natural language command, the theatron interprets and executes. Blurs the line between UI navigation and agent instruction.
 
 #### Quick Capture
 
@@ -344,17 +510,17 @@ Select an agent, see its current system prompt fully assembled (SOUL + TELOS + M
 
 #### Log Stream
 
-Tail logs from any subsystem in real-time within the workspace. Filter by crate, log level, agent. Inspired by the Clawd Control activity feed, but with structured tracing spans (from our Spec 41 observability work). Click a span to expand its children.
+Tail logs from any subsystem in real-time within the theatron. Filter by crate, log level, agent. Inspired by Clawd Control's activity feed, but with structured tracing spans (from Spec 41 observability). Click a span to expand its children.
 
 #### Infinite Loop Detection
 
-Visual indicator when an agent is stuck in a loop -- editing the same file repeatedly, retrying the same tool call, or generating similar outputs across turns. Ralph TUI's core value proposition. The workspace should surface this pattern automatically and offer a "break loop" button. We already track tool calls per session.
+Visual indicator when an agent is stuck in a loop -- editing the same file repeatedly, retrying the same tool call, or generating similar outputs across turns. Ralph TUI's core value proposition. The theatron should surface this pattern automatically and offer a "break loop" button. We already track tool calls per session.
 
 ### Control
 
 #### Tiered Model Strategy
 
-Not just per-agent model selection, but per-task-type model routing. "Use Haiku for lint fixes, Sonnet for feature work, Opus for architecture decisions." Configure tiers in the workspace, enforced by hermeneus model routing. Inspired by Ralph TUI's tiered cost strategy.
+Not just per-agent model selection, but per-task-type model routing. "Use Haiku for lint fixes, Sonnet for feature work, Opus for architecture decisions." Configure tiers in the theatron, enforced by hermeneus model routing. Inspired by Ralph TUI's tiered cost strategy.
 
 #### Autonomous Run Limits
 
@@ -372,7 +538,7 @@ Select multiple agents, apply the same model change. Select multiple tasks, reas
 
 #### Ambient Mode
 
-A view designed to stay open on a secondary monitor. Minimal chrome, large type, auto-rotating between: active agent status, task board, cost ticker, phase progress. The workspace as a passive awareness surface -- glanceable, not interactive. Think airport departure board aesthetic.
+A view designed to stay open on a secondary monitor. Minimal chrome, large type, auto-rotating between: active agent status, task board, cost ticker, phase progress. The theatron as a passive awareness surface -- glanceable, not interactive. Think airport departure board aesthetic.
 
 #### Activity Heatmap
 
@@ -404,54 +570,57 @@ Generate a PDF or markdown summary of work completed this week/month. Tasks done
 
 #### Mobile Companion
 
-Not a full mobile app -- a responsive web view optimized for phone. Check tasks, see health, toggle a model. Quick actions from the couch. The full workspace stays on the desktop.
+Not a full mobile app -- a responsive web view optimized for phone. Check tasks, see health, toggle a model. Quick actions from the couch. The full theatron stays on the desktop.
 
 #### Notification Bridge
 
-Workspace events (task completed, phase failed, health degraded) can optionally push to Signal or system notifications. The workspace doesn't require you to be watching it -- it reaches out when something needs attention.
+Theatron events (task completed, phase failed, health degraded) can optionally push to Signal or system notifications. The theatron doesn't require you to be watching it -- it reaches out when something needs attention.
 
 #### Plugin Marketplace View
 
 If prostheke (WASM plugins) matures, a view for browsing, installing, and configuring plugins. Each plugin shows its granted capabilities, resource usage, and health.
 
-#### Drag-and-Drop Workspace Customization
-
-Homarr-style widget placement. Instead of fixed view layouts, let the operator rearrange panels, resize tiles, pin favorites. Save layouts per user preference. Heavy lift but dramatically increases personalization.
-
 ---
 
 ## Implementation Strategy
 
-### Phase 0: Frame
+### Phase 0: Frame + Widget Engine
 
-The skeleton that everything hangs on.
+The skeleton that everything hangs on, plus the composition engine that makes everything else possible.
 
 - Pylon serves static Svelte build at `/` (already does this)
 - Single SSE endpoint `/ws/events` with typed event discriminator
-- Symbolon auth for all workspace routes
-- Navigation shell: Home, Agents, Projects, Health, Cost, Chat
+- Symbolon auth for all theatron routes
+- **Widget registry** -- typed widget components with declared data bindings, config schemas, and size constraints
+- **Layout renderer** -- 12-column grid engine with placement, resize, collapse
+- **View store** -- CRUD API for view definitions (`/api/theatron/views`), persisted in taxis config
+- **Nous-scope resolution** -- views know their scope, widgets inherit scope for data filtering
+- Navigation shell: Home, Agents (grouped), Projects, Health, Cost, Chat
 - Agent bar (from Spec 29) as persistent top element
 
-### Phase 1: Home + Tasks
+### Phase 1: Home + Tasks + Default Widgets
 
-The "sit down at the desk" experience.
+The "sit down at the desk" experience, composed from the Phase 0 engine.
 
 - Task CRUD API (`/api/tasks`)
 - Task store (SQLite, system-level -- not per-session)
-- Home view: greeting, task board, active-now panel, system summary, cost summary
+- Default Home view definition: greeting, task-list, active-now, health-summary, cost-sparkline widgets
 - Agent tools: `task_list`, `task_create`, `task_complete`
 - SSE events: `task:created`, `task:updated`, `task:completed`
+- First batch of widget types: task-list, agent-bar, health-summary, cost-sparkline, active-now, greeting
 
-### Phase 2: Agent Detail + Controls
+### Phase 2: Agent Detail + Controls + Groups
 
-See and control each agent.
+See and control each agent. Nous-scoped views.
 
-- Agent detail view with status, metrics, recent sessions
-- Config toggles that write to taxis (model, autonomy, wake, prosoche)
+- Agent detail view definition with status, metrics, recent sessions widgets
+- Config toggle widgets that write to taxis (model, autonomy, wake, prosoche)
 - Hot-reload via arc-swap so toggles take effect without restart
-- Prosoche attention panel (read-only view of scored signals)
+- Prosoche attention widget (read-only view of scored signals)
+- **Agent groups** -- taxis config for named groups, group navigation, group-scoped views
+- Agent-authored view API (POST `/api/theatron/views` with author field)
 
-### Phase 3: Health Board
+### Phase 3: Health Board + Log Stream
 
 Full system visibility.
 
@@ -459,14 +628,15 @@ Full system visibility.
 - Heartbeat protocol (each actor reports periodically)
 - Health view with tiles, status indicators, action buttons
 - Service actions: restart, force-cycle, compact, clear cache
+- Log stream widget with crate/level/agent filtering
 
 ### Phase 4: Projects + Phases
 
 Dianoia visualization.
 
-- Phase dependency graph renderer (SVG or Canvas)
-- Plan-level detail with agent assignment and status
-- Checkpoint approval from the UI
+- Phase dependency graph renderer widget (SVG or Canvas)
+- Plan-level detail widget with agent assignment and status
+- Checkpoint approval widget
 - Verification gap display
 
 ### Phase 5: Cost Cockpit
@@ -475,7 +645,7 @@ Token economics.
 
 - Per-turn cost recording (already in session store)
 - Aggregation queries by agent, model, time window
-- Cost view with charts, projections, model comparison
+- Cost view with chart widgets, projections, model comparison
 - Budget alert configuration
 
 ### Phase 6: Session Replay
@@ -483,17 +653,29 @@ Token economics.
 The crown jewel.
 
 - Session timeline data structure (turns, tools, thinking, tokens)
-- Timeline renderer with scrubbing
+- Timeline renderer widget with scrubbing
 - Turn detail expansion (full request/response)
+- Context window visualizer widget (token budget per turn)
 - Active session live-follow mode
 
-### Phase 7: Canvas Integration
+### Phase 7: Canvas Integration + Drag-and-Drop
 
-Spec 43b brought into the workspace.
+Spec 43b brought into the theatron, plus full layout customization.
 
-- Canvas panel (collapsible sidebar or inline)
+- Canvas panel widget (collapsible sidebar or inline)
 - Surface type renderers (progress, table, metrics, markdown, graph)
 - Agent tool: `canvas_update`
+- Drag-and-drop widget rearrangement
+- Resize handles
+- Save/load custom layouts
+
+### Phase 8: Command Palette + Quick Capture
+
+Power-user interaction model.
+
+- Cmd+K palette with natural language parsing
+- Quick capture inbox with prosoche routing
+- Keyboard shortcuts for common actions
 
 ---
 
@@ -509,9 +691,13 @@ Spec 43b brought into the workspace.
 
 5. **How does autonomous mode work?** When toggled ON, does the agent immediately scan for work? Or wait for next prosoche cycle? What triggers the first autonomous turn?
 
-6. **Canvas panel placement.** Right sidebar (like VS Code panels), bottom panel (like a terminal), or floating/dockable? Probably right sidebar with collapse toggle.
+6. **Widget registry: static or dynamic?** Are widget types compiled into the Svelte build (static set, fast), or loaded dynamically at runtime (extensible, slower)? Static for v1, dynamic for prostheke plugin widgets later?
 
-7. **What is the gnomon name for this?** The workspace where truth is unconcealed. Where human and agents share a room. The seeing-place. Contenders: theatron (seeing-place), synoptikon (seeing-together), synergeion (working-together-place). Or something we have not yet discovered.
+7. **View definition format.** YAML in taxis config? JSON in SQLite? Both? The view store needs to support both built-in defaults (shipped with the binary) and user-created views (persisted at runtime).
+
+8. **Agent group membership: static or dynamic?** Config-defined groups are simple but rigid. Alternatively, groups could be derived from task assignments or domain ownership. Start static, evolve later.
+
+9. **View authoring permissions.** Can any agent create any view? Or only views scoped to themselves? Should agent-authored views require operator approval before appearing in navigation?
 
 ---
 
@@ -521,7 +707,6 @@ Spec 43b brought into the workspace.
 - Mobile app (web-responsive is sufficient for v1)
 - Replacing Signal (complementary, not competitive)
 - Real-time collaborative editing (not Google Docs for agents)
-- Custom dashboard builder / widget framework (views are designed, not assembled)
 
 ---
 
@@ -537,13 +722,13 @@ Spec 43b brought into the workspace.
 
 ### External -- Agent Dashboards + Ops
 
-- [AgentOps](https://github.com/AgentOps-AI/agentops) (5.3K stars, MIT) -- Session replay timelines, cost tracking, agent execution graphs. Open source app in `/app` directory. Best reference for session replay UI.
-- [Clawd Control](https://github.com/Temaki-AI/clawd-control) (111 stars, MIT) -- SSE live updates, fleet health tiles, agent detail drilldowns, auto-discovery. Vanilla HTML/JS + Node. Zero build step. Best reference for simple, effective health monitoring.
-- [mudrii/openclaw-dashboard](https://github.com/mudrii/openclaw-dashboard) (136 stars, MIT) -- Python + pure HTML/SVG. 11 panels: cost trends, session tracking, sub-agent hierarchy trees, cron status. Zero external dependencies.
-- [Lattice Workbench](https://latticeruntime.com/) (Apache 2.0) -- Agent IDE + operations console. Multi-model chat, real-time monitoring, cost tracking. Desktop/web/CLI/VS Code. Enforcement primitives (identity, auth, audit, constraints).
-- [Ralph TUI](https://www.verdent.ai/guides/ralph-tui-ai-agent-dashboard) -- Terminal-based agent mission control. Key ideas: iteration limits for autonomous runs, infinite loop detection, session state persistence to disk, tiered model strategy (expensive for architecture, cheap for lint). The "if you can't see what your AI is doing, you shouldn't let it touch your codebase" philosophy.
+- [AgentOps](https://github.com/AgentOps-AI/agentops) (5.3K stars, MIT) -- Session replay timelines, cost tracking, agent execution graphs. Best reference for session replay UI.
+- [Clawd Control](https://github.com/Temaki-AI/clawd-control) (111 stars, MIT) -- SSE live updates, fleet health tiles, agent detail drilldowns. Vanilla HTML/JS + Node. Best reference for simple health monitoring.
+- [mudrii/openclaw-dashboard](https://github.com/mudrii/openclaw-dashboard) (136 stars, MIT) -- Python + pure HTML/SVG. 11 panels: cost trends, session tracking, sub-agent hierarchy. Zero external dependencies.
+- [Lattice Workbench](https://latticeruntime.com/) (Apache 2.0) -- Agent IDE + operations console. Enforcement primitives (identity, auth, audit, constraints).
+- [Ralph TUI](https://www.verdent.ai/guides/ralph-tui-ai-agent-dashboard) -- Terminal agent mission control. Iteration limits, infinite loop detection, tiered model strategy.
 
-### External -- LLM Engineering
+### External -- LLM Engineering + Composition
 
-- [Langfuse](https://github.com/langfuse/langfuse) (22.5K stars, open source) -- LLM observability, trace visualization, prompt management + playground, evaluation datasets, cost metrics. Best reference for trace detail views and prompt iteration workflow.
-- [Homarr](https://homarr.dev/) -- Self-hosted server dashboard with drag-and-drop widget placement. Reference for customizable layout patterns.
+- [Langfuse](https://github.com/langfuse/langfuse) (22.5K stars, open source) -- LLM observability, trace visualization, prompt playground, evaluation datasets. Best reference for trace detail views.
+- [Homarr](https://homarr.dev/) -- Self-hosted server dashboard with drag-and-drop widget placement. Reference for composable layout patterns.

@@ -473,7 +473,7 @@ Slack: raw API, reqwest + WebSocket Socket mode.
 
 | Phase | Work | Origin |
 |-------|------|--------|
-| 6.1 | Coworking Workspace — shared operations surface, controls, health, cost, session replay | Spec 45 (absorbs Specs 30, 43b) |
+| 6.1 | Theatron — composable operations system, widget engine, nous-typed views, agent-authored dashboards | Spec 45 (absorbs Specs 30, 43b) |
 | 6.2 | Interop — A2A protocol, workflow engine, IDE integration | Spec 22 |
 | 6.3 | Aletheia Linux — eBPF/DBus sensing, NixOS module | Spec 24, Issue #332 |
 | 6.4 | Embedding space intelligence — JEPA goal vectors, collapse prevention, embedding health monitoring | Spec 27 (phases 5-6) |

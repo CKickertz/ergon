@@ -73,6 +73,7 @@ These exist as TypeScript modules in the current runtime. They will become Rust 
 | `dianoia` | Multi-phase planning orchestrator | M4 |
 | `prostheke` | WASM plugin host (wasmtime) | M5 |
 | `autarkeia` | Agent export/import | M5 |
+| `theatron` | Composable operations UI: widget registry, view engine, nous-typed dashboards | M6 |
 
 ---
 
