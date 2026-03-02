@@ -2,7 +2,7 @@
 
 > Roadmap and current status for Aletheia's evolution from TypeScript prototype to Rust production system.
 > For decisions see `docs/decisions/`, for standards see `docs/STANDARDS.md`, for triage see `.planning/DISPOSITION.md` (local).
-> Last updated: 2026-03-04 — M0a/M0b/M1 complete, M2 core + M3 complete, pipeline wired end-to-end. 781 tests across 15 crates, ~24K lines Rust. mneme v2 Phase 9 done.
+> Last updated: 2026-03-02 — M0a/M0b/M1 complete, M2 core + M3 complete, pipeline wired end-to-end. 781 tests across 15 crates, ~24K lines Rust. mneme v2 Phase 9 done.
 
 ---
 
@@ -542,7 +542,7 @@ Last updated: 2026-03-04
 | M2.1c | ✅ **Complete** | CozoDB absorption analysis — research doc: module deps, FTS feasibility, graph algo inventory, 42 unsafe sites, integration plan. PR #364. |
 | M2.1d | ✅ **Complete** | Test expansion — 79 new tests across koina, mneme, nous, taxis + integration tests. PR #365. |
 | M2.2 | ✅ **Complete** | Context bootstrap — BootstrapAssembler (oikos cascade), TokenBudget (system/history/turn zones), CharEstimator, SectionPriority (Required > Important > Flexible > Optional), section-aware truncation, tool summary tiers. 14 tests. PR #369. |
-| M2.3 | ⚙️ **In progress** | CozoDB absorption — mneme-engine crate with forked CozoDB, 3 compile bugs patched, unsafe sites isolated in graph-builder. Phases 1-3 complete (PR #378, 252 tests). Phases 4-6 remaining (GSD prompt 05). |
+| M2.3 | ✅ **Complete** | CozoDB absorption — mneme-engine crate with forked CozoDB, 3 compile bugs patched, unsafe sites isolated in graph-builder. Phases 1-9 complete (PRs #378, #407, #422). Hybrid retrieval (vector + graph + BM25), idiom migration, clippy clean. |
 | M2.4 | ✅ **Complete** | taxis config loading — figment-based YAML cascade, AletheiaConfig structs, resolve_nous() merger, env overrides, camelCase compat. 37 tests. PR #379. |
 | M2.5 | ✅ **Complete** | nous execute stage — core LLM call + tool dispatch loop, LoopDetector integration, signal classification, `run_pipeline` entry point. ThinkingConfig in hermeneus. 78 tests. PR #381. |
 | M3.1a | ✅ **Complete** | symbolon (auth) — JWT sessions (access+refresh), API keys (ale_ format, blake3), argon2id passwords, RBAC (Operator/Agent/Readonly), AuthStore (SQLite), 50 tests. PR #368. |
