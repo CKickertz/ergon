@@ -457,6 +457,12 @@ Slack: raw API, reqwest + WebSocket Socket mode.
 - **Issue #239 (Graph maintenance):** Automated CozoDB graph QA, vector dedup, orphan purge. Per-nous cron schedule.
 - **ECC Instinct System (INST-01..08):** Tool call observation → pattern extraction → confidence-scored instincts (0.0-1.0) with domain tagging and per-nous scoping → evolution pipeline clusters instincts into skills/rules. Source: everything-claude-code continuous-learning-v2.
 - **ECC Tool Observability (OBS-01..04):** Pre/post-tool hook points, tool call tracing spans, async hook registration API. Source: everything-claude-code hooks architecture.
+- **Rowboat Knowledge Ingestion (KI-01..05):** Source monitoring + incremental change detection (mtime+hash) + batch extraction pipeline + entity deduplication + strictness levels. Informs Phase 15 knowledge lifecycle. Source: rowboat build_graph, graph_state, strictness_analyzer.
+- **Rowboat Background Scheduling (SCHED-01..03):** Cron + window + once scheduling for autonomous agent runs. Informs daemon cron capabilities. Source: rowboat agent-schedule/runner.
+- **Orbital Agent Safety (ASAFE-01..02):** Tool repetition detection (loop breaker) + checkpoint/rollback for destructive ops. Source: Orbital ToolRepetitionDetector, checkpoint services.
+- **Orbital Distillation Optimization (DIST-01..02):** Model downshift for cheaper distillation + structured condensing prompt template. Source: Orbital condense/index.ts, custom condensing handler.
+- **Orbital Eval Schema (EVAL-05..06):** Concrete data model: runs→tasks→metrics→toolErrors. CozoDB storage. Source: Orbital packages/evals DB schema.
+- **Orbital Manual Skills (SKILL-01):** Static skill files in workspace, loadable on demand. Bridges gap before instinct→skill evolution. Source: Orbital .agent/skills/ pattern.
 
 **Success criteria:** Syn, Akron, Syl, Demiurge all running simultaneously. Background tasks execute independently. Cross-nous task handoff works without operator intervention. Semantic routing correctly directs messages to domain-appropriate nous without config labels.
 
