@@ -249,7 +249,7 @@ Three movements:
 
 1. **Integration (current)** — Bug fixes, recall pipeline, typed query builder. The engine connects to agent cognition.
 2. **Transformation** — Crate consolidation (`mneme-engine` + `graph-builder` → `mneme`), API reshaped around knowledge and memory (Fact, Association, Confidence, TemporalQuery — not DataValue, NamedRows), HNSW rewritten in-memory, CSV/JSON import restored as Rust-native, C/C++ dependencies evaluated for pure-Rust replacement.
-3. **Intelligence** — Knowledge extraction from conversations, conflict resolution on write, temporal decay, Louvain-based consolidation. The engine doesn't just store — it learns.
+3. **Intelligence** — Knowledge extraction from conversations, conflict resolution on write, temporal decay, Louvain-based consolidation. Framed as **recursive evolution**: the engine co-evolves with the operator and environment. Fitness is contextual, variation is preserved, ecological succession replaces aggressive pruning.
 
 Design principles:
 - **Reshape, don't shrink.** The 30+ graph algorithms, bi-temporal reasoning, Datalog optimizer, BM25 — all stay. We use 15% today but the roadmap reaches into the rest. Strip dead code (removed platform backends, FFI shims), not dormant capability.
@@ -443,10 +443,10 @@ Slack: raw API, reqwest + WebSocket Socket mode.
 | Phase | Crate | What It Proves |
 |-------|-------|----------------|
 | 4.1 | `nous` (multi-actor) | Multiple NousActors on real Tokio threads, independent inboxes |
-| 4.2 | `daemon` | Per-nous cron, evolution, prosoche, graph maintenance, morning digest. **Includes instinct-based behavioral learning:** tool call observation → pattern extraction → confidence-scored instincts → evolution into skills/rules. |
+| 4.2 | `daemon` | Per-nous cron, evolution, prosoche, graph maintenance, morning digest. **Includes recursive behavioral evolution:** tool call observation → pattern extraction → fitness-scored instincts (contextual, not abstract) → niche differentiation → ecological succession. Not self-improvement — co-evolution with operator and environment. |
 | 4.3 | `dianoia` | Planning FSM from first principles. **Core redesign:** workspace model (not pipeline). 3 operating modes: full project (research→execute→verify), quick task (appetite-based, time-boxed), and autonomous background. Skip any phase that adds no value. State machine with exhaustive `match` on typed enums — every transition explicit. |
 | 4.4 | Cross-nous coordination | Competence-aware routing, structured task handoff, priority queue |
-| 4.5 | Tool observability | Pre/post-tool hooks with structured tracing spans. Foundation for instinct system, debugging, and Spec 41 observability. |
+| 4.5 | Tool observability | Pre/post-tool hooks with structured tracing spans. Foundation for behavioral evolution, environmental pressure signals, debugging, and Spec 41 observability. |
 
 **Absorbed ideas:**
 - **Spec 27 Phase 4 (Cross-Agent Semantic Routing):** Route messages to the correct nous by comparing message embedding to each agent's memory cluster centroid. Replaces config-label domain matching with embedding-space proximity — foundational to correct multi-nous coordination. (Moved from M6 per G-05: without this, M4 ships with inherited string-matching patterns.)
@@ -455,14 +455,14 @@ Slack: raw API, reqwest + WebSocket Socket mode.
 - **Spec 42, Gap 2 (Task Handoff):** Structured lightweight schema: `{id, from, to, type, context, status, created, updated}`. State machine: created → assigned → in-progress → review → done. Context travels with handoff. Informal `sessions_send` remains for quick coordination (G-13).
 - **Issue #313 (Prosoche signals):** Activity tracking, HEARTBEAT_OK dedup, work signals. Built into daemon.
 - **Issue #239 (Graph maintenance):** Automated CozoDB graph QA, vector dedup, orphan purge. Per-nous cron schedule.
-- **ECC Instinct System (INST-01..08):** Tool call observation → pattern extraction → confidence-scored instincts (0.0-1.0) with domain tagging and per-nous scoping → evolution pipeline clusters instincts into skills/rules. Source: everything-claude-code continuous-learning-v2.
+- **ECC Instinct System (INST-01..11, evolution-reframed):** Tool call observation → pattern extraction → fitness-scored instincts (contextual, not abstract) with niche identification and per-nous scoping → ecological succession + speciation + co-evolutionary recalibration. Reframed from self-improvement (optimize toward fixed target) to recursive evolution (co-evolve with operator and environment). Fitness through use, not scoring. Variation preserved, not pruned. Source: everything-claude-code continuous-learning-v2, reframed.
 - **ECC Tool Observability (OBS-01..04):** Pre/post-tool hook points, tool call tracing spans, async hook registration API. Source: everything-claude-code hooks architecture.
 - **Rowboat Knowledge Ingestion (KI-01..05):** Source monitoring + incremental change detection (mtime+hash) + batch extraction pipeline + entity deduplication + strictness levels. Informs Phase 15 knowledge lifecycle. Source: rowboat build_graph, graph_state, strictness_analyzer.
 - **Rowboat Background Scheduling (SCHED-01..03):** Cron + window + once scheduling for autonomous agent runs. Informs daemon cron capabilities. Source: rowboat agent-schedule/runner.
 - **Orbital Agent Safety (ASAFE-01..02):** Tool repetition detection (loop breaker) + checkpoint/rollback for destructive ops. Source: Orbital ToolRepetitionDetector, checkpoint services.
 - **Orbital Distillation Optimization (DIST-01..02):** Model downshift for cheaper distillation + structured condensing prompt template. Source: Orbital condense/index.ts, custom condensing handler.
 - **Orbital Eval Schema (EVAL-05..06):** Concrete data model: runs→tasks→metrics→toolErrors. CozoDB storage. Source: Orbital packages/evals DB schema.
-- **Orbital Manual Skills (SKILL-01):** Static skill files in workspace, loadable on demand. Bridges gap before instinct→skill evolution. Source: Orbital .agent/skills/ pattern.
+- **Orbital Manual Skills (SKILL-01):** Static skill files in workspace, loadable on demand. Bridges gap before instinct speciation produces stable behavioral patterns. Source: Orbital .agent/skills/ pattern.
 
 **Success criteria:** Syn, Akron, Syl, Demiurge all running simultaneously. Background tasks execute independently. Cross-nous task handoff works without operator intervention. Semantic routing correctly directs messages to domain-appropriate nous without config labels.
 
