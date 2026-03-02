@@ -1,4 +1,11 @@
 // Provider router — model string to provider, failover, retry with backoff
+//
+// Model ID reference (Anthropic direct API):
+//   claude-opus-4-6              — Opus 4.6 (latest flagship)
+//   claude-sonnet-4-20250514     — Sonnet 4
+//   claude-haiku-4-5-20251001    — Haiku 4.5
+// Config uses "anthropic/" prefix (e.g. "anthropic/claude-opus-4-6") which
+// the router strips before passing to the provider SDK.
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createLogger } from "../koina/logger.js";
@@ -35,9 +42,9 @@ interface RetryConfig {
 }
 
 const DEFAULT_RETRY: RetryConfig = {
-  maxAttempts: 3,
+  maxAttempts: 5,
   baseDelayMs: 1000,
-  maxDelayMs: 8000,
+  maxDelayMs: 30_000,
 };
 
 function isRetryable(error: unknown): error is ProviderError {
@@ -47,7 +54,13 @@ function isRetryable(error: unknown): error is ProviderError {
     && !FAILOVER_ONLY_CODES.has(error.code);
 }
 
-function backoffDelay(attempt: number, config: RetryConfig): number {
+function backoffDelay(attempt: number, config: RetryConfig, error?: ProviderError): number {
+  // If the provider specified a retry-after hint, use it (with jitter)
+  if (error?.retryAfterMs) {
+    const hint = Math.min(error.retryAfterMs, config.maxDelayMs);
+    const jitter = hint * 0.2 * (Math.random() * 2 - 1);
+    return Math.round(hint + jitter);
+  }
   // Exponential: 1s, 2s, 4s... capped at maxDelayMs
   // Add ±20% jitter to avoid thundering herd
   const base = Math.min(config.baseDelayMs * 2 ** attempt, config.maxDelayMs);
@@ -131,9 +144,10 @@ export class ProviderRouter {
         const remaining = this.retryConfig.maxAttempts - attempt - 1;
         if (remaining === 0) break;
 
-        const delay = backoffDelay(attempt, this.retryConfig);
+        const provError = error as ProviderError;
+        const delay = backoffDelay(attempt, this.retryConfig, provError);
         log.warn(
-          `${label} failed (${(error as ProviderError).code}), retrying in ${delay}ms ` +
+          `${label} failed (${provError.code}), retrying in ${delay}ms ` +
           `(attempt ${attempt + 1}/${this.retryConfig.maxAttempts})`,
         );
         await sleep(delay);
@@ -208,7 +222,7 @@ export class ProviderRouter {
     }
   }
 
-  async *completeStreaming(request: CompletionRequest): AsyncGenerator<StreamingEvent> {
+  async *completeStreaming(request: CompletionRequest, fallbackModels?: string[]): AsyncGenerator<StreamingEvent> {
     const entry = this.resolve(request.model);
     const model = request.model.includes("/") ? request.model.split("/").pop()! : request.model;
     log.debug(`Streaming ${request.model} via ${entry.name} (model=${model})`);
@@ -229,9 +243,10 @@ export class ProviderRouter {
         const remaining = this.retryConfig.maxAttempts - attempt - 1;
         if (remaining === 0) break;
 
-        const delay = backoffDelay(attempt, this.retryConfig);
+        const provError = error as ProviderError;
+        const delay = backoffDelay(attempt, this.retryConfig, provError);
         log.warn(
-          `stream(${model}) failed (${(error as ProviderError).code}), retrying in ${delay}ms ` +
+          `stream(${model}) failed (${provError.code}), retrying in ${delay}ms ` +
           `(attempt ${attempt + 1}/${this.retryConfig.maxAttempts})`,
         );
         await sleep(delay);
@@ -255,7 +270,7 @@ export class ProviderRouter {
       }
     }
 
-    // Primary exhausted — try backups
+    // Primary exhausted — try backups (same model, different credentials)
     if (lastError instanceof ProviderError && (lastError as ProviderError).recoverable && this.backupProviders.length > 0) {
       for (let i = 0; i < this.backupProviders.length; i++) {
         log.warn(`Primary credential exhausted retries (${(lastError as ProviderError).code}), trying backup ${i + 1}/${this.backupProviders.length}`);
@@ -263,6 +278,22 @@ export class ProviderRouter {
           yield* this.backupProviders[i]!.completeStreaming({ ...request, model });
           return;
         } catch { /* backup also failed — try next */
+          continue;
+        }
+      }
+    }
+
+    // Model fallback — try degraded models (e.g. Sonnet when Opus is overloaded)
+    if (fallbackModels && fallbackModels.length > 0 && lastError instanceof ProviderError && (lastError as ProviderError).recoverable) {
+      for (const fallback of fallbackModels) {
+        const fbModel = fallback.includes("/") ? fallback.split("/").pop()! : fallback;
+        log.warn(`Primary model ${model} exhausted all retries (${(lastError as ProviderError).code}), falling back to ${fbModel}`);
+        try {
+          const fbEntry = this.resolve(fallback);
+          yield* fbEntry.provider.completeStreaming({ ...request, model: fbModel });
+          return;
+        } catch (fbError) {
+          log.warn(`Fallback model ${fbModel} also failed: ${fbError instanceof Error ? fbError.message : fbError}`);
           continue;
         }
       }
