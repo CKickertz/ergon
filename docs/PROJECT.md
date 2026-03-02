@@ -443,9 +443,10 @@ Slack: raw API, reqwest + WebSocket Socket mode.
 | Phase | Crate | What It Proves |
 |-------|-------|----------------|
 | 4.1 | `nous` (multi-actor) | Multiple NousActors on real Tokio threads, independent inboxes |
-| 4.2 | `daemon` | Per-nous cron, evolution, prosoche, graph maintenance, morning digest |
+| 4.2 | `daemon` | Per-nous cron, evolution, prosoche, graph maintenance, morning digest. **Includes instinct-based behavioral learning:** tool call observation → pattern extraction → confidence-scored instincts → evolution into skills/rules. |
 | 4.3 | `dianoia` | Planning FSM from first principles. **Core redesign:** workspace model (not pipeline). 3 operating modes: full project (research→execute→verify), quick task (appetite-based, time-boxed), and autonomous background. Skip any phase that adds no value. State machine with exhaustive `match` on typed enums — every transition explicit. |
 | 4.4 | Cross-nous coordination | Competence-aware routing, structured task handoff, priority queue |
+| 4.5 | Tool observability | Pre/post-tool hooks with structured tracing spans. Foundation for instinct system, debugging, and Spec 41 observability. |
 
 **Absorbed ideas:**
 - **Spec 27 Phase 4 (Cross-Agent Semantic Routing):** Route messages to the correct nous by comparing message embedding to each agent's memory cluster centroid. Replaces config-label domain matching with embedding-space proximity — foundational to correct multi-nous coordination. (Moved from M6 per G-05: without this, M4 ships with inherited string-matching patterns.)
@@ -454,6 +455,8 @@ Slack: raw API, reqwest + WebSocket Socket mode.
 - **Spec 42, Gap 2 (Task Handoff):** Structured lightweight schema: `{id, from, to, type, context, status, created, updated}`. State machine: created → assigned → in-progress → review → done. Context travels with handoff. Informal `sessions_send` remains for quick coordination (G-13).
 - **Issue #313 (Prosoche signals):** Activity tracking, HEARTBEAT_OK dedup, work signals. Built into daemon.
 - **Issue #239 (Graph maintenance):** Automated CozoDB graph QA, vector dedup, orphan purge. Per-nous cron schedule.
+- **ECC Instinct System (INST-01..08):** Tool call observation → pattern extraction → confidence-scored instincts (0.0-1.0) with domain tagging and per-nous scoping → evolution pipeline clusters instincts into skills/rules. Source: everything-claude-code continuous-learning-v2.
+- **ECC Tool Observability (OBS-01..04):** Pre/post-tool hook points, tool call tracing spans, async hook registration API. Source: everything-claude-code hooks architecture.
 
 **Success criteria:** Syn, Akron, Syl, Demiurge all running simultaneously. Background tasks execute independently. Cross-nous task handoff works without operator intervention. Semantic routing correctly directs messages to domain-appropriate nous without config labels.
 
@@ -473,8 +476,9 @@ Slack: raw API, reqwest + WebSocket Socket mode.
 | 5.4 | Cutover | TS runtime retired, Rust binary takes production |
 
 **Absorbed ideas:**
-- **Spec 40 (Testing Strategy):** Coverage targets, integration patterns, contract tests adapted for `cargo test`. CI enforcement.
-- **Spec 41 (Observability):** tracing crate with spans, layers, journald integration. Prometheus/OpenTelemetry metrics. Structured query: "why was that turn slow?"
+- **Spec 40 (Testing Strategy):** Coverage targets, integration patterns, contract tests adapted for `cargo test`. CI enforcement. **Includes behavioral eval framework (EVAL-01..04):** capability evals, recall quality scoring (precision@k, recall@k), model-graded response quality, regression tracking per-commit. Source: ECC eval-harness.
+- **Spec 41 (Observability):** tracing crate with spans, layers, journald integration. Prometheus/OpenTelemetry metrics. Structured query: "why was that turn slow?" **Tool call spans (OBS-03)** wired as tracing spans — queryable tool performance and error analysis.
+- **ECC Plugin Architecture (PLUG-01..03):** Plugin manifest schema (TOML), lifecycle events (SessionStart/End, Pre/PostTool, Pre/PostDistillation), WASM isolation with capability-based permissions. Informs prostheke design.
 
 **Success criteria:** All existing functionality works. Test suite passes. Binary deploys via `scp + systemctl`.
 
