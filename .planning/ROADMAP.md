@@ -53,7 +53,7 @@ Plans:
 
 Plans:
 - [x] 02-01: Fix minhash_lsh.rs UB with bytemuck, static_assertions, newrocks SAFETY (Wave 1)
-- [ ] 02-02: SAFETY comment audit across both crates (Wave 1)
+- [x] 02-02: SAFETY comment audit across both crates (Wave 1)
 
 ### Phase 3: Wire into mneme
 **Goal**: KnowledgeStore uses mneme-engine for storage -- facts round-trip through insert+query, HNSW vector search returns nearest neighbors, graph algorithms run safely from async context
@@ -158,7 +158,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 | 2. Critical Safety | 2/2 | Complete   | 2026-03-01 |
 | 3. Wire into mneme | 2/2 | Complete | 2026-03-01 |
 | 4. Hybrid Retrieval | 2/2 | Complete   | 2026-03-01 |
-| 5. Error + Idiom Migration | 3/3 | Complete   | 2026-03-02 |
+| 5. Error + Idiom Migration | 2/2 | Complete   | 2026-03-02 |
 | 6. Performance | 1/1 | Complete   | 2026-03-02 |
 | 7. Integrate Hybrid Retrieval | 1/1 | Complete   | 2026-03-02 |
 | 8. Integrate Idiom Migration | 1/1 | Complete   | 2026-03-02 |

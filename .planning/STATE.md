@@ -25,7 +25,7 @@ See: .planning/PROJECT.md (updated 2026-03-01)
 Phase: 8 of 8 (Integrate Idiom Migration) -- COMPLETE
 Plan: 1 of 1 in current phase (08-01 complete)
 Status: Phase 8 Plan 01 complete -- snafu, tracing, LazyLock, unwrap audit, ABSORPTION.md landed on main (f9f7b8bb)
-Last activity: 2026-03-02 -- 08-01 complete: all idiom migrations integrated, 173 mneme-engine tests pass, milestone v1.0 COMPLETE
+Last activity: 2026-03-02 -- PR #407 merged (clippy cleanup, 22→10 warnings). 08-01 complete: all idiom migrations integrated, 173 mneme-engine tests pass, milestone v1.0 COMPLETE
 
 Progress: [██████████] 100%
 
