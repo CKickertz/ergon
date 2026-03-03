@@ -2,7 +2,7 @@
 
 > Roadmap and current status for Aletheia's evolution from TypeScript prototype to Rust production system.
 > For decisions see `docs/decisions/`, for standards see `docs/STANDARDS.md`, for triage see `.planning/DISPOSITION.md` (local).
-> Last updated: 2026-03-03 — M0a/M0b/M1/M2/M3 complete, M3.6 + M4.1 scaffolds merged. 924 tests across 17 crates, ~30K lines Rust. 2 new crates: dianoia, daemon.
+> Last updated: 2026-03-03 — M0a/M0b/M1/M2/M3 complete, M3.6 + M4.1 scaffolds merged. 973 tests across 18 crates, ~33K lines Rust.
 
 ---
 
@@ -571,11 +571,25 @@ Last updated: 2026-03-04
 | M4.1a | ✅ **Complete** | dianoia scaffold — planning state machine, workspace model, 3 operating modes. PR #448. |
 | M4.1b | ✅ **Complete** | daemon scaffold — cron scheduling, task runner, prosoche attention stub. PR #450. |
 | M4.1c | ✅ **Complete** | melete structured distillation — model downshift, section templates, memory flush. PR #449. |
-| M4.2+ | Not started | Multi-nous wiring, roles, integration. Pending scaffold merge + deep review. |
+| M4.1d | ✅ **Complete** | Privacy scrub phase 1 — delete corpus, remove passwords, depersonalize docs. PR #465. |
+| M4.1e | ✅ **Complete** | Quality sweep — docs, cruft, consistency, standards across 102 files. PR #468. |
+| M4.1f | ✅ **Complete** | PII scrub + instance boundary migration — untrack 131 skills, 8 operator scripts, all operator config. .example stubs, parameterized templates, .gitignore enforcement. PR #467. |
+| M4.1g | 🔄 **In progress** | Git history rewrite — squash 200 commits to ~33, scrub author metadata and commit messages. Prompt 49 on Metis. |
+| M4.1h | 📋 **Planned** | Security hardening v1 — pre-commit gitleaks hook, CI secret scanning, SECURITY.md, CODEOWNERS, signed commits (SEC-01..05). |
+| M4.2+ | 📋 **Planned** | Integration wiring — CrossNousRouter, daemon, knowledge extraction wired into live actors (WIRE-01..04). |
+| M4.2-sec | 📋 **Planned** | Runtime security hardening — TLS (rustls), CORS lockdown, body limits, security headers, log redaction, CSRF. Gate for M5 cutover (RSEC-01..06). |
+| M4.2-data | 📋 **Planned** | Data lifecycle — schema migration system, backup/restore CLI, retention policies (DATA-01..04). |
+| M4.2-resil | 📋 **Planned** | Resilience — provider health tracking, graceful degradation, Signal reconnect, timeout budgets (RESIL-01..04). |
+| M4.2-obs | 📋 **Planned** | Observability — Prometheus metrics, structured errors, `aletheia status` CLI (OBS-01..03). |
+| M4.2-api | 📋 **Planned** | API contract — OpenAPI spec, versioning, consistent error format (API-01..03). |
+| M4.2-rel | 📋 **Planned** | Release engineering — semver, changelog, SBOM, upgrade path, rollback procedure (REL-01..04, SUPPLY-01..03). |
+| M4.2-deploy | 📋 **Planned** | Deployment — install guide, config reference, system requirements, instance.example completeness (DEPLOY-01..04). |
+| M4.2-dsov | 📋 **Planned** | Data sovereignty — network call inventory, no-telemetry statement, data flow diagram (DSOV-01..03). |
+| M4.2-contrib | 📋 **Planned** | Contributor experience — CONTRIBUTING.md, code of conduct, architecture walkthrough, good-first-issues (CONTRIB-01..04). |
 | M5 | Not started | Plugins, portability, cutover |
 | M6 | Backlog | Independent items, work anytime after M5 |
 
-**Totals:** 17 crate directories (13 application + `aletheia` binary + `graph-builder` + `integration-tests` + `mneme-bench`), 924 tests, ~30K lines of Rust (+46K vendored CozoDB in mneme-engine).
+**Totals:** 18 crate directories (14 application + `aletheia` binary + `graph-builder` + `integration-tests` + `mneme-bench`), 973 tests, ~33K lines of Rust (+46K vendored CozoDB in mneme-engine).
 
 ---
 
