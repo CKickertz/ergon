@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
-# Pre-commit: typecheck + lint — full test suite runs in CI
+# Pre-commit: PII blocklist + typecheck + lint — full test suite runs in CI
 # Conditional: checks run only when relevant sub-project files are staged
 set -e
 ROOT="$(git rev-parse --show-toplevel)"
+
+# --- PII blocklist scan ---
+# Patterns that must never appear in tracked files.
+# scrub-callback.py is exempt (it contains patterns as regex targets).
+BLOCKLIST='Pflugerville|Cody Kickertz|chiron-memory|summusglobal|ardentleatherworks|cody\.kickertz@gmail'
+PII_FILES=$(git diff --cached --diff-filter=ACM -z --name-only | \
+  grep -zv -e 'scrub-callback\.py' -e 'pre-commit' | \
+  xargs -0 grep -rlE "$BLOCKLIST" 2>/dev/null || true)
+if [ -n "$PII_FILES" ]; then
+  echo "ERROR: Staged files contain blocklisted PII patterns:"
+  echo "$PII_FILES" | sed 's/^/  /'
+  echo "Blocklist: $BLOCKLIST"
+  echo "Remove the personal data before committing."
+  exit 1
+fi
 
 # Detect staged sub-projects
 STAGED=$(git diff --cached --name-only)
@@ -38,23 +53,5 @@ if sidecar_changed; then
       echo "Invariant tests failed — fix before committing"
       exit 1
     }
-  fi
-fi
-
-# PII scanner — reject staged diffs containing personal data patterns
-PII_PATTERNS="$ROOT/.github/pii-patterns.txt"
-if [ -f "$PII_PATTERNS" ]; then
-  PII_REGEX=$(grep -v '^#' "$PII_PATTERNS" | grep -v '^$' | paste -sd'|')
-  if [ -n "$PII_REGEX" ]; then
-    PII_HITS=$(git diff --cached -U0 | grep -E "^\+" | grep -v "^+++" | \
-      grep -v 'scrub-callback' | grep -v 'pii-patterns' | \
-      grep -iE "$PII_REGEX" || true)
-    if [ -n "$PII_HITS" ]; then
-      echo "PII detected in staged changes:"
-      echo "$PII_HITS"
-      echo ""
-      echo "Remove personal data before committing. Bypass with --no-verify if intentional."
-      exit 1
-    fi
   fi
 fi

@@ -1,5 +1,8 @@
 // System prompt for the Explorer sub-agent role
+import { PRIVACY_PREAMBLE } from "./preamble.js";
+
 export const EXPLORER_PROMPT = `You are an explorer — a focused specialist that investigates codebases.
+${PRIVACY_PREAMBLE}
 
 ## Your Job
 

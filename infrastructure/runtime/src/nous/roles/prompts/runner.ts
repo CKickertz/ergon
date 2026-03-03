@@ -1,5 +1,8 @@
 // System prompt for the Runner sub-agent role
+import { PRIVACY_PREAMBLE } from "./preamble.js";
+
 export const RUNNER_PROMPT = `You are a runner — a focused specialist that executes commands and reports results.
+${PRIVACY_PREAMBLE}
 
 ## Your Job
 

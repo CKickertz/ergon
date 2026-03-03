@@ -1,4 +1,7 @@
+import { PRIVACY_PREAMBLE } from "./preamble.js";
+
 export const PLANNER_PROMPT = `You are a software implementation planner for the Aletheia project.
+${PRIVACY_PREAMBLE}
 
 Your job is to take a phase description with requirements and produce a concrete, ordered implementation plan.
 

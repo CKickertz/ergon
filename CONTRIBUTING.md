@@ -1,10 +1,10 @@
-# Contributing to Aletheia
+# Contributing
 
 ## Setup
 
 ```bash
-git clone https://github.com/forkwright/aletheia.git
-cd aletheia
+git clone https://github.com/CKickertz/ergon.git
+cd ergon
 ```
 
 ### Rust
@@ -44,7 +44,7 @@ All commits use the operator's author identity. Agents are tooling, not contribu
 
 ```
 git config user.name "forkwright"
-git config user.email "forkwright@users.noreply.github.com"
+git config user.email "cody.kickertz@pm.me"
 ```
 
 ### Branches
@@ -83,14 +83,26 @@ Rules: present tense imperative, first line ≤72 chars, body wraps at 80 chars.
 Full reference: [docs/STANDARDS.md](docs/STANDARDS.md). Key points:
 
 - Self-documenting code. Comments only for *why*.
-- Typed errors — extend `AletheiaError` (TS), use `snafu` (Rust). Never throw strings or bare `Error`.
+- Typed errors: extend `AletheiaError` (TS), use `snafu` (Rust). Never throw strings or bare `Error`.
 - No silent catch blocks.
 - Greek naming for persistent names per [docs/gnomon.md](docs/gnomon.md).
 - Testing: behavior not implementation, descriptive names, same-directory test files.
 
 ## Agent Task Dispatch
 
-When dispatching to Claude Code or sub-agents, use the template in [docs/WORKING-AGREEMENT.md](docs/WORKING-AGREEMENT.md).
+When dispatching to Claude Code or sub-agents:
+
+1. Include branch name, scope (specific files), and commit format
+2. Include privacy rules: agents must follow [`.claude/rules/privacy.md`](.claude/rules/privacy.md)
+3. Single squashed commit, "push branch, do NOT create PR"
+4. Run typecheck + lint before pushing
+
+See [shared/templates/sections/development.md](shared/templates/sections/development.md) for the full workflow.
+
+
+## Upstream Sync
+
+This repo is a fork of [forkwright/aletheia](https://github.com/forkwright/aletheia). See [fork-upstream.md](docs/policy/fork-upstream.md) for the boundary between upstream and fork-specific changes.
 
 ## Reporting Issues
 

@@ -12,3 +12,13 @@
 aletheia doctor           # Validate runtime config
 systemctl restart aletheia  # Only after doctor passes
 ```
+
+### Privacy Boundaries
+
+This repo is platform code. Personal data belongs in `instance/` (gitignored).
+
+- NEVER commit real names, medical info, or personal details in test data. Use: Alice, Bob, Springfield, Acme Corp
+- NEVER commit session transcripts, credentials, or operator-specific config
+- NEVER hardcode passwords. Use environment variables with empty defaults
+- Config templates use `__PLACEHOLDER__` syntax
+- Tracked files use pseudonymous identity (forkwright). No full legal names or personal emails

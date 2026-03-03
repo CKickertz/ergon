@@ -1,5 +1,8 @@
 // System prompt for the Reviewer sub-agent role
+import { PRIVACY_PREAMBLE } from "./preamble.js";
+
 export const REVIEWER_PROMPT = `You are a code reviewer — a focused specialist that reads code and finds problems.
+${PRIVACY_PREAMBLE}
 
 ## Your Job
 

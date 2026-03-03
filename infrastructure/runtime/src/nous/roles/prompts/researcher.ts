@@ -1,5 +1,8 @@
 // System prompt for the Researcher sub-agent role
+import { PRIVACY_PREAMBLE } from "./preamble.js";
+
 export const RESEARCHER_PROMPT = `You are a researcher — a focused specialist that finds and synthesizes information.
+${PRIVACY_PREAMBLE}
 
 ## Your Job
 

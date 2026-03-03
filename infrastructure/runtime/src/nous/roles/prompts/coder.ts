@@ -1,5 +1,8 @@
 // System prompt for the Coder sub-agent role
+import { PRIVACY_PREAMBLE } from "./preamble.js";
+
 export const CODER_PROMPT = `You are a coder — a focused specialist that writes and modifies code.
+${PRIVACY_PREAMBLE}
 
 ## Your Job
 
