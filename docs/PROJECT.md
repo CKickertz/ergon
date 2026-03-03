@@ -2,7 +2,7 @@
 
 > Roadmap and current status for Aletheia's evolution from TypeScript prototype to Rust production system.
 > For decisions see `docs/decisions/`, for standards see `docs/STANDARDS.md`, for triage see `.planning/DISPOSITION.md` (local).
-> Last updated: 2026-03-02 — M0a/M0b/M1 complete, M2 core + M3 complete, pipeline wired end-to-end. 781 tests across 15 crates, ~24K lines Rust. mneme v2 Phase 9 done.
+> Last updated: 2026-03-05 — M0a/M0b/M1 complete, M2 core + M3 complete, pipeline wired end-to-end. 849 tests across 15 crates, ~27K lines Rust. mneme v2 Phases 9-11 done.
 
 ---
 
@@ -561,12 +561,17 @@ Last updated: 2026-03-04
 | M3.4c | ✅ **Complete** | agora inbound routing — MessageRouter with 5-priority binding resolution (group→source→channel→global→none), session key template expansion, background dispatch task. PR #421. |
 | M3.4d | ✅ **Complete** | End-to-end integration tests — HTTP→pipeline→provider→persistence round-trip with mock providers, JWT auth validation, bootstrap assembly verification. 7 tests. PR #418. |
 | M3.4e | ✅ **Complete** | mneme hybrid search bug fixes — graph score aggregation (`graph_raw` + `sum()`), RRF rank encoding (0→-1), empty seed_entities handling. 4 tests. PR #422. (Completes mneme v2 Phase 9.) |
-| M3.5+ | Not started | Delivery reliability, cross-nous sessions, recall pipeline wiring (mneme v2 Phase 10) |
+| M3.5a | ✅ **Complete** | KnowledgeVectorSearch bridge — feature-gated `VectorSearch` trait adapter for recall pipeline. 4 tests. PR #444. |
+| M3.5b | ✅ **Complete** | Recall pipeline wiring — `EmbeddingSettings` in taxis config, embedding provider creation in `main.rs`, wired to `NousManager`. 2 tests. PR #446. (mneme v2 Phase 10 partial.) |
+| M3.5c | ✅ **Complete** | Iterative recall — 2-cycle retrieval with terminology discovery, gap detection, `LoopDetector` ring buffer. Tool repetition detection (`ASAFE-01`). 8+ tests. PR #443. (Completes mneme v2 Phase 10.) |
+| M3.5d | ✅ **Complete** | Typed Datalog query builder — field enums, fluent API (`QueryBuilder`/`PutBuilder`/`SelectBuilder`), ~10 queries migrated from string constants. Regression tests. PR #447. (Completes mneme v2 Phase 11.) |
+| M3.5e | ✅ **Complete** | Execution resilience — `StuckDetector` with error pattern normalization, iteration caps, blocker file writing. 5 tests. PR #442. (Dianoia orchestrator.) |
+| M3.6+ | Not started | Delivery reliability, cross-nous sessions, knowledge extraction (mneme v2 Phase 12+) |
 | M4 | Not started | Multi-nous, roles, daemon, melete, dianoia |
 | M5 | Not started | Plugins, portability, cutover |
 | M6 | Backlog | Independent items, work anytime after M5 |
 
-**Totals:** 15 crate directories (11 application + `aletheia` binary + `graph-builder` + `integration-tests` + `mneme-bench`), 781 tests (`#[test]` + `#[tokio::test]`), ~24K lines of Rust (+42K vendored CozoDB in mneme-engine).
+**Totals:** 15 crate directories (11 application + `aletheia` binary + `graph-builder` + `integration-tests` + `mneme-bench`), 849 tests (`#[test]` + `#[tokio::test]`), ~27K lines of Rust (+46K vendored CozoDB in mneme-engine).
 
 ---
 
