@@ -139,8 +139,7 @@ impl TestHarness {
         std::fs::create_dir_all(root.join("theke")).expect("mkdir theke");
         std::fs::write(root.join("nous/test-nous/SOUL.md"), "You are a test agent.")
             .expect("write SOUL.md");
-        std::fs::write(root.join("theke/USER.md"), "Test user.")
-            .expect("write USER.md");
+        std::fs::write(root.join("theke/USER.md"), "Test user.").expect("write USER.md");
 
         let oikos = Arc::new(Oikos::from_root(root));
         let store = SessionStore::open_in_memory().expect("in-memory store");
@@ -305,7 +304,8 @@ async fn http_create_session_send_message_get_history() {
     let messages = history["messages"].as_array().expect("messages array");
     assert!(
         messages.len() >= 2,
-        "history should contain user + assistant messages, got {}", messages.len()
+        "history should contain user + assistant messages, got {}",
+        messages.len()
     );
     assert_eq!(messages[0]["role"], "user");
     assert_eq!(messages[0]["content"], "hello");
@@ -455,13 +455,20 @@ async fn health_returns_status() {
     let router = harness.router();
 
     let resp = router
-        .oneshot(Request::get("/api/health").body(Body::empty()).expect("request"))
+        .oneshot(
+            Request::get("/api/health")
+                .body(Body::empty())
+                .expect("request"),
+        )
         .await
         .expect("health check");
     assert_eq!(resp.status(), StatusCode::OK);
 
     let body = body_json(resp).await;
-    assert!(body["status"].is_string(), "health response should have status field");
+    assert!(
+        body["status"].is_string(),
+        "health response should have status field"
+    );
     assert_eq!(body["status"], "healthy");
 }
 
@@ -485,4 +492,61 @@ async fn unauthenticated_request_rejected() {
 
     let resp = router.oneshot(req).await.expect("unauthenticated request");
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn close_session_archives_it() {
+    let harness = TestHarness::build().await;
+    let router = harness.router();
+
+    let session = harness.create_session(&router).await;
+    let id = session["id"].as_str().expect("session id");
+
+    let token = harness.auth_token();
+    let req = Request::delete(format!("/api/sessions/{id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.clone().oneshot(req).await.expect("close session");
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = router
+        .clone()
+        .oneshot(harness.authed_get(&format!("/api/sessions/{id}")))
+        .await
+        .expect("get archived session");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["status"], "archived");
+}
+
+#[tokio::test]
+async fn send_message_stores_both_roles_in_history() {
+    let harness = TestHarness::build().await;
+    let router = harness.router();
+
+    let session = harness.create_session(&router).await;
+    let id = session["id"].as_str().expect("session id");
+
+    let req = harness.authed_request(
+        "POST",
+        &format!("/api/sessions/{id}/messages"),
+        Some(serde_json::json!({ "content": "test message" })),
+    );
+    let resp = router.clone().oneshot(req).await.expect("send message");
+    let _ = body_string(resp).await;
+
+    let resp = router
+        .clone()
+        .oneshot(harness.authed_get(&format!("/api/sessions/{id}/history")))
+        .await
+        .expect("get history");
+    let history = body_json(resp).await;
+    let messages = history["messages"].as_array().expect("messages array");
+
+    assert_eq!(messages.len(), 2, "should have exactly user + assistant");
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"], "test message");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["content"], "Hello from mock!");
 }

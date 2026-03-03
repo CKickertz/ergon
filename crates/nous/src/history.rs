@@ -107,9 +107,8 @@ pub fn load_history(
         }
 
         let role = match msg.role {
-            Role::User => "user",
+            Role::User | Role::ToolResult => "user",
             Role::Assistant => "assistant",
-            Role::ToolResult => "tool_result",
             Role::System => unreachable!(),
         };
 
@@ -253,8 +252,7 @@ mod tests {
         append(&store, Role::Assistant, "fourth", 50);
 
         let config = HistoryConfig::default();
-        let (messages, _) =
-            load_history(&store, "ses-1", 100_000, &config, "fifth").expect("load");
+        let (messages, _) = load_history(&store, "ses-1", 100_000, &config, "fifth").expect("load");
 
         assert_eq!(messages[0].content, "first");
         assert_eq!(messages[1].content, "second");
@@ -276,8 +274,7 @@ mod tests {
         };
 
         // Tight budget: only fits a few of 10 messages
-        let (_, result) =
-            load_history(&store, "ses-1", 500, &config, "current").expect("load");
+        let (_, result) = load_history(&store, "ses-1", 500, &config, "current").expect("load");
 
         assert!(result.truncated);
         assert!(result.messages_loaded < 10);
@@ -288,6 +285,35 @@ mod tests {
 
         assert!(!result_full.truncated);
         assert_eq!(result_full.messages_loaded, 10);
+    }
+
+    #[test]
+    fn tool_result_mapped_to_user_role() {
+        let store = setup_store();
+        append(&store, Role::ToolResult, "file contents", 100);
+
+        let config = HistoryConfig::default();
+        let (messages, result) =
+            load_history(&store, "ses-1", 100_000, &config, "next").expect("load");
+
+        assert_eq!(result.messages_loaded, 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "file contents");
+    }
+
+    #[test]
+    fn token_estimates_preserved() {
+        let store = setup_store();
+        append(&store, Role::User, "q", 42);
+        append(&store, Role::Assistant, "a", 99);
+
+        let config = HistoryConfig::default();
+        let (messages, result) =
+            load_history(&store, "ses-1", 100_000, &config, "next").expect("load");
+
+        assert_eq!(result.tokens_consumed, 141);
+        assert_eq!(messages[0].token_estimate, 42);
+        assert_eq!(messages[1].token_estimate, 99);
     }
 
     #[test]
