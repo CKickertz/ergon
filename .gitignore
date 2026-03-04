@@ -3,8 +3,8 @@
 !/instance.example/
 
 # === Legacy paths (remove after migration completes) ===
-theke/
-projects/
+/theke/
+/projects/
 /archive/
 nous/*/
 !nous/_example/
@@ -102,6 +102,10 @@ infrastructure/runtime/package-lock.json
 ui/node_modules/
 ui/dist/
 *sync-conflict*
+
+# === Learned skills (instance-specific, not shipped) ===
+shared/skills/
+!shared/skills/_examples/
 
 # === Ephemeral state ===
 **/.task/

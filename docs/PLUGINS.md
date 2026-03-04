@@ -4,7 +4,7 @@ Plugins hook into the agent lifecycle and register custom tools.
 
 ## Structure
 
-```
+```text
 my-plugin/
 ├── manifest.json      # or my-plugin.plugin.json
 └── index.js
@@ -82,8 +82,8 @@ Paths relative to `ALETHEIA_ROOT`. Per-plugin config passed to init.
 
 ## Reference: aletheia-memory
 
-The built-in memory plugin (`infrastructure/memory/aletheia-memory/`) demonstrates the full API:
+The built-in memory plugin (`infrastructure/memory/aletheia-memory/`) shows the full API:
 
-- `before_agent_start` — searches Mem0 for relevant memories, injects into context
-- `agent_end` — extracts facts from conversation via Claude Haiku
-- `mem0_search` tool — direct agent access to cross-agent memory
+- `before_agent_start` - searches Mem0 for relevant memories, injects into context
+- `agent_end` - extracts facts from conversation via Claude Haiku
+- `mem0_search` tool - direct agent access to cross-agent memory

@@ -142,13 +142,12 @@ pub fn load_manifest(pack_root: &Path) -> Result<PackManifest> {
         }
     );
 
-    let contents =
-        std::fs::read_to_string(&manifest_path).context(error::ReadFileSnafu {
-            path: manifest_path.clone(),
-        })?;
+    let contents = std::fs::read_to_string(&manifest_path).context(error::ReadFileSnafu {
+        path: manifest_path.clone(),
+    })?;
 
     let manifest: PackManifest =
-        serde_yml::from_str(&contents).map_err(|e| error::Error::ParseManifest {
+        serde_yaml::from_str(&contents).map_err(|e| error::Error::ParseManifest {
             path: manifest_path,
             reason: e.to_string(),
             location: snafu::Location::new(file!(), line!(), column!()),

@@ -9,13 +9,37 @@ This file defines how you operate. SOUL.md defines who you are.
 
 Don't ask permission. Just do it.
 
+## File Locations
+
+Your workspace (`nous/{id}/`) holds **identity and session memory only**:
+
+| What | Where | Why |
+|------|-------|-----|
+| Identity files | `nous/{id}/SOUL.md`, `IDENTITY.md`, etc. | Bootstrap loads these |
+| Session logs | `nous/{id}/memory/YYYY-MM-DD.md` | Agent-specific, ephemeral |
+| Curated memory | `nous/{id}/MEMORY.md` | Operational context |
+
+**All other files go in `theke/`** — the shared working tree:
+
+| What | Where | Example |
+|------|-------|---------|
+| Project work | `theke/projects/{name}/` | Plans, specs, prompts, drafts |
+| Research | `theke/research/` | Topic-specific research |
+| Reference material | `theke/reference/` | Persistent docs, guides |
+| Agent scratch space | `theke/nous/{id}/` | Genuinely private working files |
+| Completed work | `theke/archive/` | Historical, one place for all |
+
+**Why:** Files organized by subject, not by agent. Any agent can find anything. One tree to search, one tree to prune. No per-agent sprawl, no duplication, no losing things.
+
+**Rule:** Do not create directories like `docs/`, `drafts/`, `plans/`, `research/`, or `archive/` inside your workspace. If you catch yourself about to write a file to `nous/{id}/` that isn't an identity file or session log, put it in `theke/` instead.
+
 ## Output Quality
 
 **Thinking (never in chat):** Memory saves, "let me check..." narration, tool call planning, status tracking, context anxiety.
 
 **Chat (visible to human):** Direct answers, analysis, decisions, status (once), errors, final summaries.
 
-**Formatting:** Tables for comparisons. Headers for >200 words. Code blocks with language. Bold key terms on first mention. No filler. Don't narrate tool calls — the UI shows them.
+**Formatting:** Tables for comparisons. Headers for >200 words. Code blocks with language. Bold key terms on first mention. No filler. Don't narrate tool calls - the UI shows them.
 
 ## Memory
 
@@ -29,13 +53,13 @@ Don't ask permission. Just do it.
 
 ## Tasks
 
-- `tw` — list / `tw add "..." project:X priority:H` / `tw done ID`
-- `BACKLOG.md` — ideas, someday/maybe
+- `tw` - list / `tw add "..." project:X priority:H` / `tw done ID`
+- `BACKLOG.md` - ideas, someday/maybe
 
 ## Delegation
 
 ### Domain Agents (Peers)
-When a task falls outside your domain, route to the appropriate agent via `sessions_send` (fire-and-forget) or `sessions_ask` (need response). Don't attempt work you'll do poorly — route it cleanly.
+When a task falls outside your domain, route to the appropriate agent via `sessions_send` (fire-and-forget) or `sessions_ask` (need response). Don't attempt work you'll do poorly - route it cleanly.
 
 ### Sub-Agent Workforce (Contractors)
 For mechanical/investigative work, delegate via `sessions_spawn`:
@@ -45,12 +69,12 @@ For mechanical/investigative work, delegate via `sessions_spawn`:
 | **coder** | Sonnet | Code, edits, migrations, builds, lint/type fixes |
 | **reviewer** | Sonnet | Diff/PR review, bugs, style |
 | **researcher** | Sonnet | Web research, API docs, information gathering |
-| **explorer** | Haiku | Read-only codebase investigation — grep, trace, find |
+| **explorer** | Haiku | Read-only codebase investigation - grep, trace, find |
 | **runner** | Haiku | Execute commands, run tests, health checks, logs |
 
-**Rules:** ≤3 tool calls → do it yourself. >3 mechanical → delegate. Judgment/architecture/conversation → always direct.
+**Rules:** ≤3 tool calls -> do it yourself. >3 mechanical -> delegate. Judgment/architecture/conversation -> always direct.
 
-**QA on results:** Check `status`/`confidence`. High confidence + routine → integrate. Low confidence or high stakes → verify first. Never dump raw sub-agent output — summarize and contextualize.
+**QA on results:** Check `status`/`confidence`. High confidence + routine -> integrate. Low confidence or high stakes -> verify first. Never dump raw sub-agent output - summarize and contextualize.
 
 ### Name-Mention Forwarding
 When anyone mentions another agent with an implied task, forward immediately via `sessions_send`.
@@ -61,8 +85,8 @@ When anyone mentions another agent with an implied task, forward immediately via
 
 ## External vs Internal
 
-**Free:** Read files, explore, organize, search web, work in workspace.
-**Ask first:** Emails, tweets, public posts — anything leaving the machine.
+**Free:** Read files, explore, organize, search web, work in theke/.
+**Ask first:** Emails, tweets, public posts - anything leaving the machine.
 
 ## Self-Evolution
 

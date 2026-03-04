@@ -1,6 +1,6 @@
 [package]
 name = "aletheia-organon"
-version = "0.1.0"
+version.workspace = true
 description = "Tool registry, definitions, and built-in tool executors"
 edition.workspace = true
 license.workspace = true
@@ -17,6 +17,7 @@ indexmap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 snafu = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 static_assertions = { workspace = true }

@@ -151,12 +151,36 @@ impl Oikos {
         self.root.join("data").join("planning.db")
     }
 
+    /// The backups directory.
+    #[must_use]
+    pub fn backups(&self) -> PathBuf {
+        self.root.join("data").join("backups")
+    }
+
+    /// The archive directory (retained session exports).
+    #[must_use]
+    pub fn archive(&self) -> PathBuf {
+        self.root.join("data").join("archive")
+    }
+
     // --- Logs ---
 
     /// The logs directory.
     #[must_use]
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
+    }
+
+    /// Trace files directory.
+    #[must_use]
+    pub fn traces(&self) -> PathBuf {
+        self.root.join("logs").join("traces")
+    }
+
+    /// Trace archive directory.
+    #[must_use]
+    pub fn trace_archive(&self) -> PathBuf {
+        self.root.join("logs").join("traces").join("archive")
     }
 
     // --- Signal ---

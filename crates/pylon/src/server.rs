@@ -50,6 +50,7 @@ pub async fn run(config: ServerConfig) -> Result<(), ServerError> {
     let oikos = Arc::new(Oikos::from_root(&config.instance_path));
 
     let session_store = SessionStore::open(&oikos.sessions_db()).context(SessionStoreSnafu)?;
+    let session_store = Arc::new(Mutex::new(session_store));
 
     let provider_registry = Arc::new(ProviderRegistry::new());
     let tool_registry = Arc::new(ToolRegistry::new());
@@ -61,8 +62,9 @@ pub async fn run(config: ServerConfig) -> Result<(), ServerError> {
         Arc::clone(&oikos),
         None,
         None,
-        None,
+        Some(Arc::clone(&session_store)),
         Arc::new(vec![]),
+        None,
     );
     let nous_config = NousConfig::default();
     nous_manager
@@ -70,7 +72,7 @@ pub async fn run(config: ServerConfig) -> Result<(), ServerError> {
         .await;
 
     let state = Arc::new(AppState {
-        session_store: Arc::new(Mutex::new(session_store)),
+        session_store: Arc::clone(&session_store),
         nous_manager: Arc::new(nous_manager),
         provider_registry,
         tool_registry,

@@ -15,8 +15,10 @@ pub struct AletheiaConfig {
     pub channels: ChannelsConfig,
     pub bindings: Vec<ChannelBinding>,
     pub embedding: EmbeddingSettings,
+    pub data: DataConfig,
     /// External domain pack paths (directories containing pack.yaml).
     pub packs: Vec<PathBuf>,
+    pub maintenance: MaintenanceSettings,
 }
 
 /// Maps a channel source to a nous agent.
@@ -266,6 +268,128 @@ impl Default for SignalAccountConfig {
     }
 }
 
+/// Data lifecycle configuration.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct DataConfig {
+    pub retention: RetentionConfig,
+}
+
+/// Session retention policy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct RetentionConfig {
+    /// Max age for closed sessions (days).
+    pub session_max_age_days: u32,
+    /// Max age for orphaned messages (days).
+    pub orphan_message_max_age_days: u32,
+    /// Max sessions to retain per nous (0 = unlimited).
+    pub max_sessions_per_nous: u32,
+    /// Archive sessions to JSON before deletion.
+    pub archive_before_delete: bool,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            session_max_age_days: 90,
+            orphan_message_max_age_days: 30,
+            max_sessions_per_nous: 0,
+            archive_before_delete: true,
+        }
+    }
+}
+/// Instance maintenance settings.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct MaintenanceSettings {
+    pub trace_rotation: TraceRotationSettings,
+    pub drift_detection: DriftDetectionSettings,
+    pub db_monitoring: DbMonitoringSettings,
+    pub retention: RetentionSettings,
+}
+
+/// Trace file rotation settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct TraceRotationSettings {
+    pub enabled: bool,
+    pub max_age_days: u32,
+    pub max_total_size_mb: u64,
+    pub compress: bool,
+    pub max_archives: usize,
+}
+
+impl Default for TraceRotationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_age_days: 14,
+            max_total_size_mb: 500,
+            compress: true,
+            max_archives: 30,
+        }
+    }
+}
+
+/// Instance drift detection settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct DriftDetectionSettings {
+    pub enabled: bool,
+    pub alert_on_missing: bool,
+    pub ignore_patterns: Vec<String>,
+}
+
+impl Default for DriftDetectionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            alert_on_missing: true,
+            ignore_patterns: vec![
+                "data/".to_owned(),
+                "signal/".to_owned(),
+                "*.db".to_owned(),
+                ".gitkeep".to_owned(),
+            ],
+        }
+    }
+}
+
+/// Database size monitoring settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct DbMonitoringSettings {
+    pub enabled: bool,
+    pub warn_threshold_mb: u64,
+    pub alert_threshold_mb: u64,
+}
+
+impl Default for DbMonitoringSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            warn_threshold_mb: 100,
+            alert_threshold_mb: 500,
+        }
+    }
+}
+
+/// Data retention execution settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+#[derive(Default)]
+pub struct RetentionSettings {
+    pub enabled: bool,
+}
+
 /// Resolved configuration for a specific nous agent.
 ///
 /// Produced by merging [`AgentDefaults`] with a matching [`NousDefinition`].
@@ -371,6 +495,13 @@ mod tests {
         assert_eq!(config.embedding.provider, "mock");
         assert!(config.embedding.model.is_none());
         assert_eq!(config.embedding.dimension, 384);
+        // Maintenance defaults
+        assert!(config.maintenance.trace_rotation.enabled);
+        assert_eq!(config.maintenance.trace_rotation.max_age_days, 14);
+        assert!(config.maintenance.drift_detection.enabled);
+        assert!(config.maintenance.db_monitoring.enabled);
+        assert_eq!(config.maintenance.db_monitoring.warn_threshold_mb, 100);
+        assert!(!config.maintenance.retention.enabled);
     }
 
     #[test]

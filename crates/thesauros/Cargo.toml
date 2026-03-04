@@ -1,6 +1,6 @@
 [package]
 name = "aletheia-thesauros"
-version = "0.1.0"
+version.workspace = true
 description = "Domain pack loader — external knowledge, tools, and config overlays"
 edition.workspace = true
 license.workspace = true
@@ -19,8 +19,7 @@ serde_json = { workspace = true }
 snafu = { workspace = true }
 tracing = { workspace = true }
 
-[dependencies.serde_yml]
-version = "0.0.12"
+serde_yaml = { workspace = true }
 
 [dev-dependencies]
 futures = "0.3"

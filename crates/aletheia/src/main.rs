@@ -1,5 +1,6 @@
 //! Aletheia cognitive agent runtime — binary entrypoint.
 
+mod daemon_bridge;
 mod dispatch;
 
 use std::path::PathBuf;
@@ -8,7 +9,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tracing::{info, warn};
+use tracing::{Instrument, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
 use aletheia_agora::listener::ChannelListener;
@@ -17,11 +18,17 @@ use aletheia_agora::router::MessageRouter;
 use aletheia_agora::semeion::SignalProvider;
 use aletheia_agora::semeion::client::SignalClient;
 use aletheia_agora::types::ChannelProvider;
+use aletheia_daemon::maintenance::{
+    DbMonitor, DbMonitoringConfig, DriftDetectionConfig, DriftDetector, MaintenanceConfig,
+    TraceRotationConfig, TraceRotator,
+};
+use aletheia_daemon::runner::TaskRunner;
 use aletheia_hermeneus::anthropic::AnthropicProvider;
 use aletheia_hermeneus::provider::{ProviderConfig, ProviderRegistry};
 use aletheia_mneme::embedding::{EmbeddingConfig, EmbeddingProvider, create_provider};
 use aletheia_mneme::store::SessionStore;
 use aletheia_nous::config::{NousConfig, PipelineConfig};
+use aletheia_nous::cross::CrossNousRouter;
 use aletheia_nous::manager::NousManager;
 use aletheia_organon::builtins;
 use aletheia_organon::registry::ToolRegistry;
@@ -59,7 +66,7 @@ struct Cli {
     command: Option<Command>,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 enum Command {
     /// Check if the server is running
     Health {
@@ -67,20 +74,163 @@ enum Command {
         #[arg(long, default_value = "http://127.0.0.1:18789")]
         url: String,
     },
+    /// Manage database backups
+    Backup {
+        /// List available backups
+        #[arg(long)]
+        list: bool,
+        /// Prune old backups
+        #[arg(long)]
+        prune: bool,
+        /// Number of backups to keep when pruning
+        #[arg(long, default_value_t = 5)]
+        keep: usize,
+        /// Export sessions as JSON
+        #[arg(long)]
+        export_json: bool,
+    },
+    /// Instance maintenance tasks
+    Maintenance {
+        #[command(subcommand)]
+        action: MaintenanceAction,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum MaintenanceAction {
+    /// Show status of all maintenance tasks
+    Status,
+    /// Run a specific maintenance task immediately
+    Run {
+        /// Task name: trace-rotation, drift-detection, db-monitor, or all
+        task: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if let Some(Command::Health { url }) = cli.command {
-        return health(&url).await;
+    match &cli.command {
+        Some(Command::Health { url }) => return health(url).await,
+        Some(Command::Backup {
+            list,
+            prune,
+            keep,
+            export_json,
+        }) => return backup(&cli, *list, *prune, *keep, *export_json),
+        Some(Command::Maintenance { action }) => {
+            return run_maintenance(action.clone(), cli.instance_root.as_ref());
+        }
+        None => {}
     }
 
     serve(cli).await
 }
 
-#[expect(clippy::too_many_lines, reason = "binary entrypoint — sequential init steps")]
+fn run_maintenance(action: MaintenanceAction, instance_root: Option<&PathBuf>) -> Result<()> {
+    let oikos = match instance_root {
+        Some(root) => Oikos::from_root(root),
+        None => Oikos::discover(),
+    };
+    let config = load_config(&oikos).context("failed to load config")?;
+    let maint = build_maintenance_config(&oikos, &config.maintenance);
+
+    match action {
+        MaintenanceAction::Status => {
+            let (_tx, rx) = tokio::sync::watch::channel(false);
+            let mut runner = TaskRunner::new("system", rx).with_maintenance(maint);
+            runner.register_maintenance_tasks();
+            let statuses = runner.status();
+            println!("{}", serde_json::to_string_pretty(&statuses)?);
+        }
+        MaintenanceAction::Run { task } => {
+            let tasks: Vec<&str> = if task == "all" {
+                vec!["trace-rotation", "drift-detection", "db-monitor"]
+            } else {
+                vec![task.as_str()]
+            };
+            for name in tasks {
+                match name {
+                    "trace-rotation" => {
+                        let report = TraceRotator::new(maint.trace_rotation.clone())
+                            .rotate()
+                            .context("trace rotation failed")?;
+                        println!(
+                            "trace-rotation: {} rotated, {} pruned, {} bytes freed",
+                            report.files_rotated, report.files_pruned, report.bytes_freed
+                        );
+                    }
+                    "drift-detection" => {
+                        let report = DriftDetector::new(maint.drift_detection.clone())
+                            .check()
+                            .context("drift detection failed")?;
+                        println!(
+                            "drift-detection: {} missing, {} extra",
+                            report.missing_files.len(),
+                            report.extra_files.len()
+                        );
+                    }
+                    "db-monitor" => {
+                        let report = DbMonitor::new(maint.db_monitoring.clone())
+                            .check()
+                            .context("db monitor failed")?;
+                        for db in &report.databases {
+                            println!(
+                                "db-monitor: {} {}MB ({})",
+                                db.name,
+                                db.size_bytes / (1024 * 1024),
+                                db.status
+                            );
+                        }
+                    }
+                    other => anyhow::bail!(
+                        "unknown task: {other}. Valid: trace-rotation, drift-detection, db-monitor, all"
+                    ),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_maintenance_config(
+    oikos: &Oikos,
+    settings: &aletheia_taxis::config::MaintenanceSettings,
+) -> MaintenanceConfig {
+    MaintenanceConfig {
+        trace_rotation: TraceRotationConfig {
+            enabled: settings.trace_rotation.enabled,
+            trace_dir: oikos.traces(),
+            archive_dir: oikos.trace_archive(),
+            max_age_days: settings.trace_rotation.max_age_days,
+            max_total_size_mb: settings.trace_rotation.max_total_size_mb,
+            compress: settings.trace_rotation.compress,
+            max_archives: settings.trace_rotation.max_archives,
+        },
+        drift_detection: DriftDetectionConfig {
+            enabled: settings.drift_detection.enabled,
+            instance_root: oikos.root().to_path_buf(),
+            example_root: PathBuf::from("instance.example"),
+            alert_on_missing: settings.drift_detection.alert_on_missing,
+            ignore_patterns: settings.drift_detection.ignore_patterns.clone(),
+        },
+        db_monitoring: DbMonitoringConfig {
+            enabled: settings.db_monitoring.enabled,
+            data_dir: oikos.data(),
+            warn_threshold_mb: settings.db_monitoring.warn_threshold_mb,
+            alert_threshold_mb: settings.db_monitoring.alert_threshold_mb,
+        },
+        retention: aletheia_daemon::maintenance::RetentionConfig {
+            enabled: settings.retention.enabled,
+        },
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "binary entrypoint — sequential init steps"
+)]
 async fn serve(cli: Cli) -> Result<()> {
     init_tracing(&cli.log_level, cli.json_logs);
 
@@ -149,6 +299,9 @@ async fn serve(cli: Cli) -> Result<()> {
         "embedding provider created"
     );
 
+    // Cross-nous router for inter-agent messaging
+    let cross_router = Arc::new(CrossNousRouter::default());
+
     // Spawn nous actors
     // vector_search is None until Phase 2 (prompt 28) lands KnowledgeVectorSearch
     let mut nous_manager = NousManager::new(
@@ -159,6 +312,7 @@ async fn serve(cli: Cli) -> Result<()> {
         None,
         Some(Arc::clone(&session_store)),
         Arc::clone(&packs),
+        Some(Arc::clone(&cross_router)),
     );
 
     if config.agents.list.is_empty() {
@@ -190,17 +344,75 @@ async fn serve(cli: Cli) -> Result<()> {
                 domains,
             };
             nous_manager
-                .spawn(nous_config, PipelineConfig::default())
+                .spawn(
+                    nous_config,
+                    PipelineConfig {
+                        extraction: Some(aletheia_mneme::extract::ExtractionConfig::default()),
+                        ..PipelineConfig::default()
+                    },
+                )
                 .await;
         }
         info!(count = nous_manager.count(), "nous actors spawned");
     }
 
+    // Daemon — background maintenance tasks
+    let (daemon_shutdown_tx, daemon_shutdown_rx) = tokio::sync::watch::channel(false);
+    let maintenance_config = build_maintenance_config(&oikos_arc, &config.maintenance);
+    let mut daemon_runner =
+        TaskRunner::new("system", daemon_shutdown_rx).with_maintenance(maintenance_config);
+    daemon_runner.register_maintenance_tasks();
+    let daemon_handle = tokio::spawn(async move {
+        daemon_runner.run().await;
+    });
+    info!("daemon started");
+
     // Wrap in Arc — shared between dispatcher and AppState
     let nous_manager = Arc::new(nous_manager);
 
-    // Channel registry + inbound dispatch
-    let (_channel_registry, _dispatch_handle) = start_inbound_dispatch(&config, &nous_manager);
+    // Signal ready — all actors spawned, safe to accept inbound messages
+    nous_manager.ready();
+
+    // Channel registry + inbound dispatch (gated on ready signal)
+    let ready_rx = nous_manager.ready_rx();
+    let (_channel_registry, _dispatch_handle) =
+        start_inbound_dispatch(&config, &nous_manager, ready_rx);
+
+    // Daemon runners — per-agent background task scheduling
+    let (daemon_shutdown_tx, _) = tokio::sync::watch::channel(false);
+    let daemon_bridge = Arc::new(daemon_bridge::NousDaemonBridge::new(Arc::clone(
+        &nous_manager,
+    )));
+    for agent_def in &config.agents.list {
+        let mut runner = aletheia_daemon::runner::TaskRunner::with_bridge(
+            agent_def.id.clone(),
+            daemon_shutdown_tx.subscribe(),
+            daemon_bridge.clone(),
+        );
+        runner.register(aletheia_daemon::schedule::TaskDef {
+            id: format!("{}-prosoche", agent_def.id),
+            name: "Prosoche attention check".to_owned(),
+            nous_id: agent_def.id.clone(),
+            schedule: aletheia_daemon::schedule::Schedule::Interval(
+                std::time::Duration::from_secs(45 * 60),
+            ),
+            action: aletheia_daemon::schedule::TaskAction::Builtin(
+                aletheia_daemon::schedule::BuiltinTask::Prosoche,
+            ),
+            enabled: true,
+            active_window: Some((8, 23)),
+        });
+        let span = tracing::info_span!("daemon", nous.id = %agent_def.id);
+        tokio::spawn(
+            async move {
+                runner.run().await;
+            }
+            .instrument(span),
+        );
+    }
+    if !config.agents.list.is_empty() {
+        info!(count = config.agents.list.len(), "daemon runners spawned");
+    }
 
     // Pylon HTTP gateway — shares registries with NousManager
     let state = Arc::new(AppState {
@@ -228,6 +440,8 @@ async fn serve(cli: Cli) -> Result<()> {
         .context("server error")?;
 
     info!("shutting down");
+    let _ = daemon_shutdown_tx.send(true);
+    let _ = daemon_handle.await;
     state.nous_manager.shutdown_readonly().await;
     info!("shutdown complete");
 
@@ -270,6 +484,7 @@ fn build_tool_registry() -> Result<ToolRegistry> {
 fn start_inbound_dispatch(
     config: &aletheia_taxis::config::AletheiaConfig,
     nous_manager: &Arc<NousManager>,
+    ready_rx: tokio::sync::watch::Receiver<bool>,
 ) -> (Arc<ChannelRegistry>, Option<tokio::task::JoinHandle<()>>) {
     let mut channel_registry = ChannelRegistry::new();
 
@@ -300,6 +515,7 @@ fn start_inbound_dispatch(
             router,
             Arc::clone(nous_manager),
             Arc::clone(&channel_registry),
+            ready_rx,
         ))
     } else {
         None
@@ -386,6 +602,65 @@ async fn shutdown_signal() {
     }
 }
 
+fn backup(cli: &Cli, list: bool, prune: bool, keep: usize, export_json: bool) -> Result<()> {
+    let oikos = match &cli.instance_root {
+        Some(root) => Oikos::from_root(root),
+        None => Oikos::discover(),
+    };
+
+    let db_path = oikos.sessions_db();
+    let store = SessionStore::open(&db_path)
+        .with_context(|| format!("failed to open session store at {}", db_path.display()))?;
+
+    let backup_dir = oikos.backups();
+    let manager = aletheia_mneme::backup::BackupManager::new(store.conn(), &backup_dir);
+
+    if list {
+        let backups = manager.list_backups().context("failed to list backups")?;
+        if backups.is_empty() {
+            println!("No backups found.");
+        } else {
+            for b in &backups {
+                println!("{} ({} bytes)", b.filename, b.size_bytes);
+            }
+        }
+        return Ok(());
+    }
+
+    if prune {
+        let removed = manager
+            .prune_backups(keep)
+            .context("failed to prune backups")?;
+        println!("Pruned {removed} backup(s), kept {keep}.");
+        return Ok(());
+    }
+
+    if export_json {
+        let export_dir = oikos.archive().join("sessions");
+        let result = manager
+            .export_sessions_json(&export_dir)
+            .context("failed to export sessions")?;
+        println!(
+            "Exported {} session(s) to {}",
+            result.sessions_exported,
+            result.output_dir.display()
+        );
+        return Ok(());
+    }
+
+    // Default: create a backup
+    let result = manager.create_backup().context("failed to create backup")?;
+    println!(
+        "Backup created: {} ({} bytes, {} sessions, {} messages)",
+        result.path.display(),
+        result.size_bytes,
+        result.sessions_count,
+        result.messages_count,
+    );
+
+    Ok(())
+}
+
 async fn health(url: &str) -> Result<()> {
     let endpoint = format!("{url}/api/health");
     let resp = reqwest::get(&endpoint)
@@ -429,5 +704,27 @@ mod tests {
     fn health_subcommand_parses() {
         let cli = Cli::parse_from(["aletheia", "health", "--url", "http://localhost:9999"]);
         assert!(matches!(cli.command, Some(Command::Health { .. })));
+    }
+
+    #[test]
+    fn maintenance_status_parses() {
+        let cli = Cli::parse_from(["aletheia", "maintenance", "status"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Maintenance {
+                action: MaintenanceAction::Status
+            })
+        ));
+    }
+
+    #[test]
+    fn maintenance_run_parses() {
+        let cli = Cli::parse_from(["aletheia", "maintenance", "run", "trace-rotation"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Maintenance {
+                action: MaintenanceAction::Run { .. }
+            })
+        ));
     }
 }

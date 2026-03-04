@@ -1,6 +1,6 @@
 [package]
 name = "aletheia-dianoia"
-version = "0.1.0"
+version.workspace = true
 description = "Planning and project orchestration — multi-phase state machine with workspace persistence"
 edition.workspace = true
 license.workspace = true
@@ -16,8 +16,6 @@ jiff = { version = "0.2", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 snafu = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
 ulid = { workspace = true }
 
 [dev-dependencies]

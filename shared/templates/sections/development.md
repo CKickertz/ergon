@@ -21,7 +21,7 @@ npx vitest run src/path/to/specific.test.ts
 - **Author:** `forkwright <forkwright@users.noreply.github.com>` (always)
 - **Branch from main:** `git checkout -b <type>/<description> main`
 - **Rebase before push:** `git pull --rebase origin main`
-- **Commit format:** `<type>: <description>` — types: feat, fix, refactor, docs, test, chore, ci, perf
+- **Commit format:** `<type>: <description>` - types: feat, fix, refactor, docs, test, chore, ci, perf
 - **One logical change per commit.** Squash micro-commits before pushing.
 - **Always push after commit.** Commits without push don't exist.
 
@@ -45,4 +45,4 @@ When delegating to sub-agents or Claude Code, include in every task:
 
 The orchestrator creates the PR after reviewing the branch.
 
-Full task dispatch template: [CONTRIBUTING.md](/CONTRIBUTING.md#agent-task-dispatch)
+Full contribution workflow: [CONTRIBUTING.md](../../../CONTRIBUTING.md)

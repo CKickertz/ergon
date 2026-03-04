@@ -39,9 +39,10 @@ dependencies = [
 
 [[package]]
 name = "aletheia"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-agora",
+ "aletheia-daemon",
  "aletheia-hermeneus",
  "aletheia-koina",
  "aletheia-melete",
@@ -66,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-agora"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-koina",
  "aletheia-taxis",
@@ -84,23 +85,25 @@ dependencies = [
 
 [[package]]
 name = "aletheia-daemon"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-koina",
  "chrono",
  "cron",
+ "flate2",
  "jiff",
  "serde",
  "serde_json",
  "snafu",
  "static_assertions",
+ "tempfile",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "aletheia-dianoia"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-koina",
  "jiff",
@@ -116,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-graph-builder"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "atoi",
  "atomic 0.5.3",
@@ -136,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-hermeneus"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-koina",
  "reqwest",
@@ -152,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-integration-tests"
-version = "0.0.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-hermeneus",
  "aletheia-koina",
@@ -162,6 +165,7 @@ dependencies = [
  "aletheia-pylon",
  "aletheia-symbolon",
  "aletheia-taxis",
+ "aletheia-thesauros",
  "axum",
  "secrecy",
  "serde_json",
@@ -172,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-koina"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "compact_str 0.8.1",
  "serde",
@@ -186,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-melete"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-hermeneus",
  "aletheia-koina",
@@ -201,11 +205,12 @@ dependencies = [
 
 [[package]]
 name = "aletheia-mneme"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-koina",
  "aletheia-mneme-engine",
  "fastembed",
+ "jiff",
  "miette",
  "ndarray 0.16.1",
  "rusqlite",
@@ -220,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-mneme-engine"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aho-corasick",
  "approx",
@@ -271,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-nous"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-hermeneus",
  "aletheia-koina",
@@ -293,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-organon"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-hermeneus",
  "aletheia-koina",
@@ -304,11 +309,12 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "aletheia-pylon"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-hermeneus",
  "aletheia-koina",
@@ -336,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-symbolon"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "argon2",
  "blake3",
@@ -354,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-taxis"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-koina",
  "figment",
@@ -367,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-thesauros"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "aletheia-koina",
  "aletheia-organon",
