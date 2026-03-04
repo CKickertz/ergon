@@ -1,6 +1,9 @@
 # === Oikos: instance is the entire private boundary ===
 /instance/
 !/instance.example/
+/config/
+!/config/services/
+!/config/*.example.*
 
 # === Legacy paths (remove after migration completes) ===
 /theke/
