@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/aletheia",
     "crates/dianoia",
-    "crates/graph-builder",
     "crates/agora",
     "crates/daemon",
     "crates/hermeneus",
@@ -11,7 +10,6 @@ members = [
     "crates/koina",
     "crates/mneme",
     "crates/melete",
-    "crates/mneme-engine",
     "crates/nous",
     "crates/organon",
     "crates/pylon",
@@ -21,7 +19,6 @@ members = [
 ]
 exclude = [
     "tui",
-    "crates/mneme-bench",
 ]
 
 [workspace.package]
@@ -48,6 +45,7 @@ must_use_candidate = "allow"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
+exit = "deny"
 
 # High-value warnings
 await_holding_lock = "warn"
@@ -61,6 +59,7 @@ match_wildcard_for_single_variants = "warn"
 needless_for_each = "warn"
 rc_mutex = "warn"
 string_add = "warn"
+string_to_string = "warn"
 trait_duplication_in_bounds = "warn"
 unused_self = "warn"
 
@@ -78,9 +77,11 @@ serde_yaml = "0.9"
 
 # HTTP
 axum = "0.8"
+utoipa = { version = "5", features = ["axum_extras"] }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace", "limit", "set-header"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 
 # Secrets
 secrecy = { version = "0.10", features = ["serde"] }
@@ -88,6 +89,9 @@ secrecy = { version = "0.10", features = ["serde"] }
 # Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Metrics
+prometheus = { version = "0.13", features = ["process"] }
 
 # Config
 figment = { version = "0.10", features = ["yaml", "json", "env"] }
@@ -111,6 +115,10 @@ tokio-stream = "0.1"
 
 # Compression
 flate2 = "1"
+
+# TLS / Security
+rcgen = "0.13"
+regex = "1"
 
 # Testing
 proptest = "1"

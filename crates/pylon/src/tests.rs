@@ -18,6 +18,7 @@ use aletheia_symbolon::jwt::{JwtConfig, JwtManager};
 use aletheia_taxis::oikos::Oikos;
 
 use crate::router::build_router;
+use crate::security::SecurityConfig;
 use crate::state::AppState;
 
 // --- Mock Provider ---
@@ -146,12 +147,12 @@ async fn test_state_with_provider(with_provider: bool) -> (Arc<AppState>, tempfi
 
 async fn app() -> (axum::Router, tempfile::TempDir) {
     let (state, dir) = test_state().await;
-    (build_router(state), dir)
+    (build_router(state, &SecurityConfig::default()), dir)
 }
 
 async fn app_no_providers() -> (axum::Router, tempfile::TempDir) {
     let (state, dir) = test_state_with_provider(false).await;
-    (build_router(state), dir)
+    (build_router(state, &SecurityConfig::default()), dir)
 }
 
 fn json_request(method: &str, uri: &str, body: Option<serde_json::Value>) -> Request<Body> {
@@ -217,7 +218,7 @@ async fn body_string(response: axum::response::Response) -> String {
 async fn create_test_session(app: &axum::Router) -> serde_json::Value {
     let req = authed_request(
         "POST",
-        "/api/sessions",
+        "/api/v1/sessions",
         Some(serde_json::json!({
             "nous_id": "syn",
             "session_key": "test-session"
@@ -248,7 +249,7 @@ async fn sessions_require_auth() {
     let (app, _dir) = app().await;
     let req = json_request(
         "POST",
-        "/api/sessions",
+        "/api/v1/sessions",
         Some(serde_json::json!({
             "nous_id": "syn",
             "session_key": "test"
@@ -293,7 +294,7 @@ async fn expired_token_rejected() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/api/sessions")
+        .uri("/api/v1/sessions")
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {token}"))
         .body(Body::from(
@@ -314,7 +315,7 @@ async fn malformed_token_rejected() {
     let (app, _dir) = app().await;
     let req = Request::builder()
         .method("POST")
-        .uri("/api/sessions")
+        .uri("/api/v1/sessions")
         .header("content-type", "application/json")
         .header("authorization", "Bearer not.a.valid.jwt")
         .body(Body::from(
@@ -336,7 +337,7 @@ async fn missing_bearer_prefix() {
     let token = default_token();
     let req = Request::builder()
         .method("POST")
-        .uri("/api/sessions")
+        .uri("/api/v1/sessions")
         .header("content-type", "application/json")
         .header("authorization", token)
         .body(Body::from(
@@ -402,7 +403,7 @@ async fn get_session_returns_created_session() {
 
     let resp = router
         .clone()
-        .oneshot(authed_get(&format!("/api/sessions/{id}")))
+        .oneshot(authed_get(&format!("/api/v1/sessions/{id}")))
         .await
         .unwrap();
 
@@ -416,7 +417,7 @@ async fn get_session_returns_created_session() {
 async fn get_unknown_session_returns_404() {
     let (app, _dir) = app().await;
     let resp = app
-        .oneshot(authed_get("/api/sessions/nonexistent"))
+        .oneshot(authed_get("/api/v1/sessions/nonexistent"))
         .await
         .unwrap();
 
@@ -433,7 +434,7 @@ async fn close_session_returns_204() {
 
     let resp = router
         .clone()
-        .oneshot(authed_delete(&format!("/api/sessions/{id}")))
+        .oneshot(authed_delete(&format!("/api/v1/sessions/{id}")))
         .await
         .unwrap();
 
@@ -448,13 +449,13 @@ async fn get_closed_session_shows_archived() {
 
     router
         .clone()
-        .oneshot(authed_delete(&format!("/api/sessions/{id}")))
+        .oneshot(authed_delete(&format!("/api/v1/sessions/{id}")))
         .await
         .unwrap();
 
     let resp = router
         .clone()
-        .oneshot(authed_get(&format!("/api/sessions/{id}")))
+        .oneshot(authed_get(&format!("/api/v1/sessions/{id}")))
         .await
         .unwrap();
 
@@ -467,7 +468,7 @@ async fn get_closed_session_shows_archived() {
 async fn close_unknown_session_returns_404() {
     let (app, _dir) = app().await;
     let resp = app
-        .oneshot(authed_delete("/api/sessions/nonexistent"))
+        .oneshot(authed_delete("/api/v1/sessions/nonexistent"))
         .await
         .unwrap();
 
@@ -484,7 +485,7 @@ async fn history_empty_for_new_session() {
 
     let resp = router
         .clone()
-        .oneshot(authed_get(&format!("/api/sessions/{id}/history")))
+        .oneshot(authed_get(&format!("/api/v1/sessions/{id}/history")))
         .await
         .unwrap();
 
@@ -497,7 +498,7 @@ async fn history_empty_for_new_session() {
 async fn history_unknown_session_returns_404() {
     let (app, _dir) = app().await;
     let resp = app
-        .oneshot(authed_get("/api/sessions/nonexistent/history"))
+        .oneshot(authed_get("/api/v1/sessions/nonexistent/history"))
         .await
         .unwrap();
 
@@ -507,7 +508,7 @@ async fn history_unknown_session_returns_404() {
 #[tokio::test]
 async fn history_with_limit() {
     let (state, _dir) = test_state().await;
-    let router = build_router(Arc::clone(&state));
+    let router = build_router(Arc::clone(&state), &SecurityConfig::default());
 
     let created = create_test_session(&router).await;
     let id = created["id"].as_str().unwrap();
@@ -530,7 +531,7 @@ async fn history_with_limit() {
 
     let resp = router
         .clone()
-        .oneshot(authed_get(&format!("/api/sessions/{id}/history?limit=3")))
+        .oneshot(authed_get(&format!("/api/v1/sessions/{id}/history?limit=3")))
         .await
         .unwrap();
 
@@ -543,13 +544,13 @@ async fn history_with_limit() {
 #[tokio::test]
 async fn send_message_returns_sse_content_type() {
     let (state, _dir) = test_state().await;
-    let router = build_router(Arc::clone(&state));
+    let router = build_router(Arc::clone(&state), &SecurityConfig::default());
     let created = create_test_session(&router).await;
     let id = created["id"].as_str().unwrap();
 
     let req = authed_request(
         "POST",
-        &format!("/api/sessions/{id}/messages"),
+        &format!("/api/v1/sessions/{id}/messages"),
         Some(serde_json::json!({ "content": "Hello!" })),
     );
 
@@ -568,13 +569,13 @@ async fn send_message_returns_sse_content_type() {
 #[tokio::test]
 async fn send_message_stream_contains_events() {
     let (state, _dir) = test_state().await;
-    let router = build_router(Arc::clone(&state));
+    let router = build_router(Arc::clone(&state), &SecurityConfig::default());
     let created = create_test_session(&router).await;
     let id = created["id"].as_str().unwrap();
 
     let req = authed_request(
         "POST",
-        &format!("/api/sessions/{id}/messages"),
+        &format!("/api/v1/sessions/{id}/messages"),
         Some(serde_json::json!({ "content": "Hello!" })),
     );
 
@@ -600,7 +601,7 @@ async fn send_message_unknown_session_returns_404() {
     let (app, _dir) = app().await;
     let req = authed_request(
         "POST",
-        "/api/sessions/nonexistent/messages",
+        "/api/v1/sessions/nonexistent/messages",
         Some(serde_json::json!({ "content": "Hello!" })),
     );
 
@@ -616,7 +617,7 @@ async fn send_empty_message_returns_400() {
 
     let req = authed_request(
         "POST",
-        &format!("/api/sessions/{id}/messages"),
+        &format!("/api/v1/sessions/{id}/messages"),
         Some(serde_json::json!({ "content": "" })),
     );
 
@@ -627,13 +628,13 @@ async fn send_empty_message_returns_400() {
 #[tokio::test]
 async fn send_message_stores_in_history() {
     let (state, _dir) = test_state().await;
-    let router = build_router(Arc::clone(&state));
+    let router = build_router(Arc::clone(&state), &SecurityConfig::default());
     let created = create_test_session(&router).await;
     let id = created["id"].as_str().unwrap();
 
     let req = authed_request(
         "POST",
-        &format!("/api/sessions/{id}/messages"),
+        &format!("/api/v1/sessions/{id}/messages"),
         Some(serde_json::json!({ "content": "Hello!" })),
     );
     let resp = router.clone().oneshot(req).await.unwrap();
@@ -644,7 +645,7 @@ async fn send_message_stores_in_history() {
 
     let resp = router
         .clone()
-        .oneshot(authed_get(&format!("/api/sessions/{id}/history")))
+        .oneshot(authed_get(&format!("/api/v1/sessions/{id}/history")))
         .await
         .unwrap();
 
@@ -662,7 +663,7 @@ async fn send_message_stores_in_history() {
 async fn error_response_has_consistent_structure() {
     let (app, _dir) = app().await;
     let resp = app
-        .oneshot(authed_get("/api/sessions/nonexistent"))
+        .oneshot(authed_get("/api/v1/sessions/nonexistent"))
         .await
         .unwrap();
 
@@ -670,6 +671,7 @@ async fn error_response_has_consistent_structure() {
     assert!(body["error"].is_object());
     assert!(body["error"]["code"].is_string());
     assert!(body["error"]["message"].is_string());
+    assert!(body["error"]["request_id"].is_string(), "error response must include request_id");
 }
 
 #[tokio::test]
@@ -678,7 +680,7 @@ async fn malformed_create_body_returns_400() {
     let token = default_token();
     let req = Request::builder()
         .method("POST")
-        .uri("/api/sessions")
+        .uri("/api/v1/sessions")
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {token}"))
         .body(Body::from(r#"{"invalid": true}"#))
@@ -700,7 +702,7 @@ async fn malformed_send_body_returns_error() {
     let token = default_token();
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/api/sessions/{id}/messages"))
+        .uri(format!("/api/v1/sessions/{id}/messages"))
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {token}"))
         .body(Body::from(r#"{"wrong_field": "abc"}"#))
@@ -718,7 +720,7 @@ async fn malformed_send_body_returns_error() {
 #[tokio::test]
 async fn list_nous_returns_agents() {
     let (app, _dir) = app().await;
-    let resp = app.oneshot(authed_get("/api/nous")).await.unwrap();
+    let resp = app.oneshot(authed_get("/api/v1/nous")).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
@@ -730,7 +732,7 @@ async fn list_nous_returns_agents() {
 #[tokio::test]
 async fn get_nous_status() {
     let (app, _dir) = app().await;
-    let resp = app.oneshot(authed_get("/api/nous/syn")).await.unwrap();
+    let resp = app.oneshot(authed_get("/api/v1/nous/syn")).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
@@ -743,7 +745,7 @@ async fn get_nous_status() {
 async fn get_unknown_nous_returns_404() {
     let (app, _dir) = app().await;
     let resp = app
-        .oneshot(authed_get("/api/nous/nonexistent"))
+        .oneshot(authed_get("/api/v1/nous/nonexistent"))
         .await
         .unwrap();
 
@@ -756,7 +758,7 @@ async fn get_unknown_nous_returns_404() {
 async fn get_nous_tools() {
     let (app, _dir) = app().await;
     let resp = app
-        .oneshot(authed_get("/api/nous/syn/tools"))
+        .oneshot(authed_get("/api/v1/nous/syn/tools"))
         .await
         .unwrap();
 
@@ -773,11 +775,11 @@ async fn concurrent_session_creation() {
     let mut handles = Vec::new();
 
     for i in 0..5 {
-        let router = build_router(Arc::clone(&state));
+        let router = build_router(Arc::clone(&state), &SecurityConfig::default());
         handles.push(tokio::spawn(async move {
             let req = authed_request(
                 "POST",
-                "/api/sessions",
+                "/api/v1/sessions",
                 Some(serde_json::json!({
                     "nous_id": "syn",
                     "session_key": format!("concurrent-{i}")
@@ -799,13 +801,13 @@ async fn concurrent_session_creation() {
 #[tokio::test]
 async fn send_message_no_provider_returns_error() {
     let (state, _dir) = test_state_with_provider(false).await;
-    let router = build_router(Arc::clone(&state));
+    let router = build_router(Arc::clone(&state), &SecurityConfig::default());
     let created = create_test_session(&router).await;
     let id = created["id"].as_str().unwrap();
 
     let req = authed_request(
         "POST",
-        &format!("/api/sessions/{id}/messages"),
+        &format!("/api/v1/sessions/{id}/messages"),
         Some(serde_json::json!({ "content": "Hello!" })),
     );
 
@@ -818,13 +820,13 @@ async fn send_message_no_provider_returns_error() {
 #[tokio::test]
 async fn send_message_routes_through_actor() {
     let (state, _dir) = test_state().await;
-    let router = build_router(Arc::clone(&state));
+    let router = build_router(Arc::clone(&state), &SecurityConfig::default());
     let created = create_test_session(&router).await;
     let id = created["id"].as_str().unwrap();
 
     let req = authed_request(
         "POST",
-        &format!("/api/sessions/{id}/messages"),
+        &format!("/api/v1/sessions/{id}/messages"),
         Some(serde_json::json!({ "content": "Test routing" })),
     );
 
@@ -847,9 +849,9 @@ async fn send_message_routes_through_actor() {
 #[tokio::test]
 async fn nous_list_from_manager() {
     let (state, _dir) = test_state().await;
-    let router = build_router(Arc::clone(&state));
+    let router = build_router(Arc::clone(&state), &SecurityConfig::default());
 
-    let resp = router.oneshot(authed_get("/api/nous")).await.unwrap();
+    let resp = router.oneshot(authed_get("/api/v1/nous")).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
@@ -868,7 +870,7 @@ async fn empty_json_body_send_message_returns_400() {
 
     let req = authed_request(
         "POST",
-        &format!("/api/sessions/{id}/messages"),
+        &format!("/api/v1/sessions/{id}/messages"),
         Some(serde_json::json!({})),
     );
 
@@ -889,14 +891,14 @@ async fn double_close_session_is_idempotent() {
 
     let first = router
         .clone()
-        .oneshot(authed_delete(&format!("/api/sessions/{id}")))
+        .oneshot(authed_delete(&format!("/api/v1/sessions/{id}")))
         .await
         .expect("first close");
     assert_eq!(first.status(), StatusCode::NO_CONTENT);
 
     let second = router
         .clone()
-        .oneshot(authed_delete(&format!("/api/sessions/{id}")))
+        .oneshot(authed_delete(&format!("/api/v1/sessions/{id}")))
         .await
         .expect("second close");
     assert_eq!(second.status(), StatusCode::NO_CONTENT);
@@ -904,7 +906,7 @@ async fn double_close_session_is_idempotent() {
     // Session should still be accessible as archived after both closes
     let resp = router
         .clone()
-        .oneshot(authed_get(&format!("/api/sessions/{id}")))
+        .oneshot(authed_get(&format!("/api/v1/sessions/{id}")))
         .await
         .expect("get after double close");
     assert_eq!(resp.status(), StatusCode::OK);
@@ -920,7 +922,7 @@ async fn get_session_after_create_reflects_state() {
 
     let resp = router
         .clone()
-        .oneshot(authed_get(&format!("/api/sessions/{id}")))
+        .oneshot(authed_get(&format!("/api/v1/sessions/{id}")))
         .await
         .expect("response");
 
@@ -940,6 +942,52 @@ async fn unknown_route_returns_404() {
         .expect("response");
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"]["code"], "not_found");
+    assert!(body["error"]["request_id"].is_string());
+}
+
+#[tokio::test]
+async fn old_api_sessions_path_returns_gone() {
+    let (app, _dir) = app().await;
+    let resp = app
+        .oneshot(authed_get("/api/sessions"))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::GONE);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"]["code"], "api_version_required");
+    assert!(body["error"]["message"].as_str().unwrap().contains("/api/v1/sessions"));
+}
+
+#[tokio::test]
+async fn old_api_nous_path_returns_gone() {
+    let (app, _dir) = app().await;
+    let resp = app
+        .oneshot(authed_get("/api/nous"))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::GONE);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"]["code"], "api_version_required");
+    assert!(body["error"]["message"].as_str().unwrap().contains("/api/v1/nous"));
+}
+
+#[tokio::test]
+async fn fallback_404_returns_json_error() {
+    let (app, _dir) = app().await;
+    let resp = app
+        .oneshot(Request::get("/totally/unknown/path").body(Body::empty()).unwrap())
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"]["code"], "not_found");
+    assert!(body["error"]["message"].as_str().unwrap().contains("/totally/unknown/path"));
+    assert!(body["error"]["request_id"].is_string());
 }
 
 #[tokio::test]
@@ -947,7 +995,7 @@ async fn missing_auth_header_returns_401() {
     let (app, _dir) = app().await;
     let req = json_request(
         "POST",
-        "/api/sessions",
+        "/api/v1/sessions",
         Some(serde_json::json!({
             "nous_id": "syn",
             "session_key": "no-auth-test"
@@ -956,4 +1004,334 @@ async fn missing_auth_header_returns_401() {
 
     let resp = app.oneshot(req).await.expect("response");
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// --- Security Header Tests ---
+
+#[tokio::test]
+async fn security_headers_present_on_response() {
+    let (app, _dir) = app().await;
+    let resp = app
+        .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("x-frame-options").unwrap(),
+        "DENY"
+    );
+    assert_eq!(
+        resp.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        resp.headers().get("x-xss-protection").unwrap(),
+        "0"
+    );
+    assert_eq!(
+        resp.headers().get("referrer-policy").unwrap(),
+        "strict-origin-when-cross-origin"
+    );
+    assert_eq!(
+        resp.headers().get("content-security-policy").unwrap(),
+        "default-src 'self'"
+    );
+    // HSTS should NOT be present when TLS is disabled
+    assert!(resp.headers().get("strict-transport-security").is_none());
+}
+
+#[tokio::test]
+async fn hsts_header_present_when_tls_enabled() {
+    let (state, _dir) = test_state().await;
+    let security = SecurityConfig { tls_enabled: true, ..SecurityConfig::default() };
+    let router = build_router(state, &security);
+
+    let resp = router
+        .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.headers().get("strict-transport-security").unwrap(),
+        "max-age=31536000; includeSubDomains"
+    );
+}
+
+// --- Body Limit Tests ---
+
+#[tokio::test]
+async fn oversized_body_returns_413() {
+    let (state, _dir) = test_state().await;
+    let security = SecurityConfig { body_limit_bytes: 100, ..SecurityConfig::default() };
+    let router = build_router(state, &security);
+
+    let big_body = "x".repeat(200);
+    let token = default_token();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/sessions")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(big_body))
+        .unwrap();
+
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+// --- CSRF Tests ---
+
+#[tokio::test]
+async fn csrf_rejects_post_without_header() {
+    let (state, _dir) = test_state().await;
+    let security = SecurityConfig { csrf_enabled: true, ..SecurityConfig::default() };
+    let router = build_router(state, &security);
+
+    let req = authed_request(
+        "POST",
+        "/api/v1/sessions",
+        Some(serde_json::json!({
+            "nous_id": "syn",
+            "session_key": "csrf-test"
+        })),
+    );
+
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn csrf_allows_post_with_correct_header() {
+    let (state, _dir) = test_state().await;
+    let security = SecurityConfig { csrf_enabled: true, ..SecurityConfig::default() };
+    let router = build_router(state, &security);
+
+    let token = default_token();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/sessions")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-requested-with", "aletheia")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "nous_id": "syn",
+                "session_key": "csrf-test"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn csrf_allows_get_without_header() {
+    let (state, _dir) = test_state().await;
+    let security = SecurityConfig { csrf_enabled: true, ..SecurityConfig::default() };
+    let router = build_router(state, &security);
+
+    let resp = router
+        .oneshot(authed_get("/api/v1/nous"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// --- OpenAPI Tests ---
+
+#[tokio::test]
+async fn openapi_spec_returns_valid_json() {
+    let (app, _dir) = app().await;
+    let resp = app
+        .oneshot(Request::get("/api/docs/openapi.json").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let version = body["openapi"].as_str().unwrap();
+    assert!(version.starts_with("3."), "expected OpenAPI 3.x, got {version}");
+}
+
+#[tokio::test]
+async fn openapi_spec_has_all_paths() {
+    let (app, _dir) = app().await;
+    let resp = app
+        .oneshot(Request::get("/api/docs/openapi.json").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    let body = body_json(resp).await;
+    let paths = body["paths"].as_object().unwrap();
+    assert!(paths.contains_key("/api/health"));
+    assert!(paths.contains_key("/api/v1/sessions"));
+    assert!(paths.contains_key("/api/v1/sessions/{id}"));
+    assert!(paths.contains_key("/api/v1/sessions/{id}/messages"));
+    assert!(paths.contains_key("/api/v1/sessions/{id}/history"));
+    assert!(paths.contains_key("/api/v1/nous"));
+    assert!(paths.contains_key("/api/v1/nous/{id}"));
+    assert!(paths.contains_key("/api/v1/nous/{id}/tools"));
+}
+
+#[tokio::test]
+async fn openapi_docs_no_auth_required() {
+    let (app, _dir) = app().await;
+    let resp = app
+        .oneshot(Request::get("/api/docs/openapi.json").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn openapi_spec_has_schemas() {
+    let (app, _dir) = app().await;
+    let resp = app
+        .oneshot(Request::get("/api/docs/openapi.json").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    let body = body_json(resp).await;
+    let schemas = body["components"]["schemas"].as_object().unwrap();
+    assert!(schemas.contains_key("SessionResponse"));
+    assert!(schemas.contains_key("ErrorResponse"));
+    assert!(schemas.contains_key("HealthResponse"));
+    assert!(schemas.contains_key("NousStatus"));
+}
+
+// --- Metrics Tests ---
+
+#[tokio::test]
+async fn metrics_returns_200_with_prometheus_content_type() {
+    let (app, _dir) = app().await;
+    let resp = app
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        content_type.contains("text/plain"),
+        "expected text/plain content type, got: {content_type}"
+    );
+}
+
+#[tokio::test]
+async fn metrics_no_auth_required() {
+    let (app, _dir) = app().await;
+    // No authorization header — should still succeed
+    let resp = app
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn metrics_contains_aletheia_prefixed_families() {
+    let (app, _dir) = app().await;
+    let resp = app
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("aletheia_http_requests_total"),
+        "should contain HTTP request counter"
+    );
+    assert!(
+        body.contains("aletheia_uptime_seconds"),
+        "should contain uptime gauge"
+    );
+    assert!(
+        body.contains("# HELP"),
+        "should contain Prometheus HELP comments"
+    );
+    assert!(
+        body.contains("# TYPE"),
+        "should contain Prometheus TYPE comments"
+    );
+}
+
+#[tokio::test]
+async fn metrics_counters_increment_after_request() {
+    let (state, _dir) = test_state().await;
+    let router = build_router(Arc::clone(&state), &SecurityConfig::default());
+
+    // Make a health request first to increment the counter
+    let _ = router
+        .clone()
+        .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    // Then check /metrics for the counter
+    let resp = router
+        .clone()
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("/api/health"),
+        "should contain the health endpoint path in metrics"
+    );
+}
+
+// --- CORS Tests ---
+
+#[tokio::test]
+async fn cors_permissive_when_no_origins_configured() {
+    let (state, _dir) = test_state().await;
+    let security = SecurityConfig::default(); // empty origins = permissive
+    let router = build_router(state, &security);
+
+    let req = Request::builder()
+        .method("OPTIONS")
+        .uri("/api/health")
+        .header("origin", "http://evil.example.com")
+        .header("access-control-request-method", "GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = router.oneshot(req).await.unwrap();
+    // Permissive CORS should allow any origin
+    assert!(resp.status().is_success() || resp.status() == StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn cors_rejects_unlisted_origin() {
+    let (state, _dir) = test_state().await;
+    let security = SecurityConfig { allowed_origins: vec!["http://localhost:3000".to_owned()], ..SecurityConfig::default() };
+    let router = build_router(state, &security);
+
+    let req = Request::builder()
+        .method("OPTIONS")
+        .uri("/api/health")
+        .header("origin", "http://evil.example.com")
+        .header("access-control-request-method", "GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = router.oneshot(req).await.unwrap();
+    // Should not have the evil origin in access-control-allow-origin
+    let allow_origin = resp.headers().get("access-control-allow-origin");
+    assert!(
+        allow_origin.is_none()
+            || allow_origin.unwrap() != "http://evil.example.com"
+    );
 }

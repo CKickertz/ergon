@@ -2,23 +2,28 @@
 
 use std::collections::BTreeMap;
 
-use aletheia_mneme_engine::DataValue;
+use crate::engine::DataValue;
 
 /// Datalog field reference. Implemented by per-relation field enums.
 pub trait Field: Copy {
     fn name(self) -> &'static str;
 }
 
-/// Knowledge graph relations.
+/// Knowledge graph relations stored in the CozoDB engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Relation {
+    /// Temporal facts with validity windows and confidence scores.
     Facts,
+    /// Named entities (people, places, concepts).
     Entities,
+    /// Directed edges between entities with typed relations.
     Relationships,
+    /// Vector embeddings for semantic search.
     Embeddings,
 }
 
 impl Relation {
+    /// Return the CozoDB relation name used in Datalog queries.
     pub fn name(self) -> &'static str {
         match self {
             Self::Facts => "facts",
@@ -145,6 +150,7 @@ pub struct QueryBuilder {
 }
 
 impl QueryBuilder {
+    /// Create an empty query builder.
     pub fn new() -> Self {
         Self {
             lines: Vec::new(),

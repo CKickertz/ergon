@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 aletheia-koina = { path = "../koina" }
+jiff = { workspace = true }
+prometheus = { workspace = true }
 reqwest = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }

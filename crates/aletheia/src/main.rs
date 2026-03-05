@@ -2,8 +2,9 @@
 
 mod daemon_bridge;
 mod dispatch;
+mod status;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -18,11 +19,11 @@ use aletheia_agora::router::MessageRouter;
 use aletheia_agora::semeion::SignalProvider;
 use aletheia_agora::semeion::client::SignalClient;
 use aletheia_agora::types::ChannelProvider;
-use aletheia_daemon::maintenance::{
+use aletheia_oikonomos::maintenance::{
     DbMonitor, DbMonitoringConfig, DriftDetectionConfig, DriftDetector, MaintenanceConfig,
     TraceRotationConfig, TraceRotator,
 };
-use aletheia_daemon::runner::TaskRunner;
+use aletheia_oikonomos::runner::TaskRunner;
 use aletheia_hermeneus::anthropic::AnthropicProvider;
 use aletheia_hermeneus::provider::{ProviderConfig, ProviderRegistry};
 use aletheia_mneme::embedding::{EmbeddingConfig, EmbeddingProvider, create_provider};
@@ -94,6 +95,33 @@ enum Command {
         #[command(subcommand)]
         action: MaintenanceAction,
     },
+    /// TLS certificate management
+    Tls {
+        #[command(subcommand)]
+        action: TlsAction,
+    },
+    /// Show system status
+    Status {
+        /// Server URL to check
+        #[arg(long, default_value = "http://127.0.0.1:18789")]
+        url: String,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum TlsAction {
+    /// Generate self-signed certificates for development/LAN use
+    Generate {
+        /// Output directory for cert and key files
+        #[arg(long, default_value = "instance/config/tls")]
+        output_dir: PathBuf,
+        /// Certificate validity in days
+        #[arg(long, default_value_t = 365)]
+        days: u32,
+        /// Subject Alternative Names (hostnames/IPs)
+        #[arg(long, default_values_t = vec!["localhost".to_owned(), "127.0.0.1".to_owned()])]
+        san: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -122,6 +150,8 @@ async fn main() -> Result<()> {
         Some(Command::Maintenance { action }) => {
             return run_maintenance(action.clone(), cli.instance_root.as_ref());
         }
+        Some(Command::Tls { action }) => return handle_tls(action),
+        Some(Command::Status { url }) => return status::run(url, cli.instance_root.as_ref()).await,
         None => {}
     }
 
@@ -221,7 +251,7 @@ fn build_maintenance_config(
             warn_threshold_mb: settings.db_monitoring.warn_threshold_mb,
             alert_threshold_mb: settings.db_monitoring.alert_threshold_mb,
         },
-        retention: aletheia_daemon::maintenance::RetentionConfig {
+        retention: aletheia_oikonomos::maintenance::RetentionConfig {
             enabled: settings.retention.enabled,
         },
     }
@@ -271,7 +301,7 @@ async fn serve(cli: Cli) -> Result<()> {
     let jwt_manager = JwtManager::new(JwtConfig::default());
 
     // Build shared registries — single instances used by both NousManager and AppState
-    let provider_registry = Arc::new(build_provider_registry());
+    let provider_registry = Arc::new(build_provider_registry(&config));
     let mut tool_registry = build_tool_registry()?;
 
     // Register domain pack tools alongside builtins
@@ -357,7 +387,7 @@ async fn serve(cli: Cli) -> Result<()> {
     }
 
     // Daemon — background maintenance tasks
-    let (daemon_shutdown_tx, daemon_shutdown_rx) = tokio::sync::watch::channel(false);
+    let (_daemon_shutdown_tx, daemon_shutdown_rx) = tokio::sync::watch::channel(false);
     let maintenance_config = build_maintenance_config(&oikos_arc, &config.maintenance);
     let mut daemon_runner =
         TaskRunner::new("system", daemon_shutdown_rx).with_maintenance(maintenance_config);
@@ -384,20 +414,20 @@ async fn serve(cli: Cli) -> Result<()> {
         &nous_manager,
     )));
     for agent_def in &config.agents.list {
-        let mut runner = aletheia_daemon::runner::TaskRunner::with_bridge(
+        let mut runner = aletheia_oikonomos::runner::TaskRunner::with_bridge(
             agent_def.id.clone(),
             daemon_shutdown_tx.subscribe(),
             daemon_bridge.clone(),
         );
-        runner.register(aletheia_daemon::schedule::TaskDef {
+        runner.register(aletheia_oikonomos::schedule::TaskDef {
             id: format!("{}-prosoche", agent_def.id),
             name: "Prosoche attention check".to_owned(),
             nous_id: agent_def.id.clone(),
-            schedule: aletheia_daemon::schedule::Schedule::Interval(
+            schedule: aletheia_oikonomos::schedule::Schedule::Interval(
                 std::time::Duration::from_secs(45 * 60),
             ),
-            action: aletheia_daemon::schedule::TaskAction::Builtin(
-                aletheia_daemon::schedule::BuiltinTask::Prosoche,
+            action: aletheia_oikonomos::schedule::TaskAction::Builtin(
+                aletheia_oikonomos::schedule::BuiltinTask::Prosoche,
             ),
             enabled: true,
             active_window: Some((8, 23)),
@@ -425,7 +455,8 @@ async fn serve(cli: Cli) -> Result<()> {
         start_time: Instant::now(),
     });
 
-    let app = build_router(state.clone());
+    let security = aletheia_pylon::security::SecurityConfig::from_gateway(&config.gateway);
+    let app = build_router(state.clone(), &security);
 
     let bind_addr = format!("{}:{}", cli.bind, cli.port);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -449,16 +480,35 @@ async fn serve(cli: Cli) -> Result<()> {
 }
 
 /// Build a provider registry with Anthropic if API key is available.
-fn build_provider_registry() -> ProviderRegistry {
+fn build_provider_registry(
+    config: &aletheia_taxis::config::AletheiaConfig,
+) -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
+
+    // Map taxis pricing config to hermeneus ModelPricing
+    let pricing: std::collections::HashMap<String, aletheia_hermeneus::provider::ModelPricing> =
+        config
+            .pricing
+            .iter()
+            .map(|(model, p)| {
+                (
+                    model.clone(),
+                    aletheia_hermeneus::provider::ModelPricing {
+                        input_cost_per_mtok: p.input_cost_per_mtok,
+                        output_cost_per_mtok: p.output_cost_per_mtok,
+                    },
+                )
+            })
+            .collect();
 
     match std::env::var("ANTHROPIC_API_KEY") {
         Ok(api_key) if !api_key.is_empty() => {
-            let config = ProviderConfig {
+            let provider_config = ProviderConfig {
                 api_key: Some(api_key),
+                pricing,
                 ..ProviderConfig::default()
             };
-            match AnthropicProvider::from_config(&config) {
+            match AnthropicProvider::from_config(&provider_config) {
                 Ok(provider) => {
                     registry.register(Box::new(provider));
                     info!("anthropic provider registered");
@@ -602,6 +652,56 @@ async fn shutdown_signal() {
     }
 }
 
+fn handle_tls(action: &TlsAction) -> Result<()> {
+    match action {
+        TlsAction::Generate {
+            output_dir,
+            days,
+            san,
+        } => generate_tls_certs(output_dir, *days, san),
+    }
+}
+
+fn generate_tls_certs(output_dir: &Path, days: u32, sans: &[String]) -> Result<()> {
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+
+    let subject_alt_names: Vec<String> = sans.to_vec();
+    let key_pair = rcgen::KeyPair::generate().context("failed to generate key pair")?;
+    let mut params = rcgen::CertificateParams::new(subject_alt_names)
+        .context("failed to build certificate params")?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "Aletheia Dev");
+    params.not_after = rcgen::date_time_ymd(2030, 1, 1);
+
+    // Override validity if days is reasonable
+    if days < 3650 {
+        let now = time::OffsetDateTime::now_utc();
+        let end = now + time::Duration::days(i64::from(days));
+        params.not_before = now;
+        params.not_after = end;
+    }
+
+    let cert = params
+        .self_signed(&key_pair)
+        .context("failed to generate self-signed certificate")?;
+
+    let cert_path = output_dir.join("cert.pem");
+    let key_path = output_dir.join("key.pem");
+
+    std::fs::write(&cert_path, cert.pem())
+        .with_context(|| format!("failed to write {}", cert_path.display()))?;
+    std::fs::write(&key_path, key_pair.serialize_pem())
+        .with_context(|| format!("failed to write {}", key_path.display()))?;
+
+    println!("Certificate: {}", cert_path.display());
+    println!("Private key: {}", key_path.display());
+    println!("Valid for {days} days");
+
+    Ok(())
+}
+
 fn backup(cli: &Cli, list: bool, prune: bool, keep: usize, export_json: bool) -> Result<()> {
     let oikos = match &cli.instance_root {
         Some(root) => Oikos::from_root(root),
@@ -726,5 +826,20 @@ mod tests {
                 action: MaintenanceAction::Run { .. }
             })
         ));
+    }
+
+    #[test]
+    fn status_subcommand_parses() {
+        let cli = Cli::parse_from(["aletheia", "status"]);
+        assert!(matches!(cli.command, Some(Command::Status { .. })));
+    }
+
+    #[test]
+    fn status_custom_url_parses() {
+        let cli = Cli::parse_from(["aletheia", "status", "--url", "http://example:9999"]);
+        match cli.command {
+            Some(Command::Status { url }) => assert_eq!(url, "http://example:9999"),
+            _ => panic!("expected Status command"),
+        }
     }
 }
