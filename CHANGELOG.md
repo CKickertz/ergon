@@ -1,0 +1,56 @@
+# Changelog
+
+## [0.10.1](https://github.com/CKickertz/ergon/compare/v0.10.0...v0.10.1) (2026-03-05)
+
+
+### Features
+
+* binary entrypoint, recall pipeline, pylon routing, registry dedup ([9f7aa59](https://github.com/CKickertz/ergon/commit/9f7aa59243c6d579bd54727a0fa3a437ebbabb4f))
+* core runtime — knowledge graph, prosoche, clean-room rewrite, OAuth, hardening ([9387f01](https://github.com/CKickertz/ergon/commit/9387f016cfeb4f0a3560676ac5d83af9563fcd50))
+* **daemon:** instance maintenance — TraceRotator with gzip archiving, DriftDetector against instance.example/, DbMonitor with threshold alerts, RetentionExecutor trait, maintenance CLI subcommand, configurable schedules ([e4186df](https://github.com/CKickertz/ergon/commit/e4186df435be6050b75b3e47656e3e45c11ac072))
+* **daemon:** instance maintenance tasks ([#472](https://github.com/CKickertz/ergon/issues/472)) ([e4186df](https://github.com/CKickertz/ergon/commit/e4186df435be6050b75b3e47656e3e45c11ac072))
+* dianoia planning crate, daemon scheduler, structured distillation, cross-nous sessions, knowledge extraction, thesauros domain packs (M3.6+M4.1) ([b87de2d](https://github.com/CKickertz/ergon/commit/b87de2d82a52340fd3183f7de7d26acc4b3fef5e))
+* **dianoia:** persistent multi-phase planning runtime — v1 + v2 file-backed state ([0ed9519](https://github.com/CKickertz/ergon/commit/0ed951993b00f62e0546883213328f4496181744))
+* e2e tests, hybrid search fixes, history/finalize/routing pipeline stages (Phase 9) ([4f6f4db](https://github.com/CKickertz/ergon/commit/4f6f4db096f174ce9951c584c53e012c30da8ff3))
+* fastembed vectors, workspace tools, pylon auth, mneme-engine, agora channels, taxis config (M3.2-M3.5) ([3e62019](https://github.com/CKickertz/ergon/commit/3e620190f720659052e84d8ac3ffc20750b96212))
+* hermeneus streaming, organon tool registry, symbolon auth, pylon gateway, context bootstrap (M2.2-M3.1) ([50974e5](https://github.com/CKickertz/ergon/commit/50974e5a5ce7c05b5f63b46b992e2f06dbf2a4d3))
+* hot-reload, hook system, agent export, gold theme, design system ([7fe02b1](https://github.com/CKickertz/ergon/commit/7fe02b12b142d7f0135bc713188cad297a3a709a))
+* hybrid search fixes, execution resilience, recall pipeline wiring, typed Datalog queries, iterative recall (Phases 10-11) ([ebd9b16](https://github.com/CKickertz/ergon/commit/ebd9b16567cedb96d84d3a0c5dd1fd237019e7bd))
+* hybrid search, agora channels, workspace architecture, CodeMirror, organon indexer ([1b0f875](https://github.com/CKickertz/ergon/commit/1b0f875a7fd70acdc1148d08992bfafc32e68c61))
+* **koina:** structured observability — pipeline spans, tool metrics, provider telemetry ([#476](https://github.com/CKickertz/ergon/issues/476)) ([2b8fdce](https://github.com/CKickertz/ergon/commit/2b8fdce6ff1477ae324b4ab96a0a9e28df52b93f))
+* **koina:** structured observability — pipeline stage spans, tool execution metrics with ToolStats, LLM provider telemetry with cost estimates, HTTP request ID middleware, channel message tracing with PII redaction ([2b8fdce](https://github.com/CKickertz/ergon/commit/2b8fdce6ff1477ae324b4ab96a0a9e28df52b93f))
+* memory extraction pipeline, reinforcement loop, dianoia collaborative API ([cc9bb91](https://github.com/CKickertz/ergon/commit/cc9bb919a32cd80f62f501340988a3aab03d3309))
+* memory pipeline, sub-agent infrastructure, parallel tools, PII detection ([0dfc281](https://github.com/CKickertz/ergon/commit/0dfc281bc57636264de2e0640ef51ee7df695bf7))
+* mneme storage + knowledge types, hermeneus LLM provider, nous pipeline crate (M1-M2.1) ([ec6950a](https://github.com/CKickertz/ergon/commit/ec6950a616e4ff49c988a583931488b256ba1b86))
+* **mneme-engine:** CozoDB absorption — hybrid retrieval, idiom migration, zero clippy warnings ([68a29eb](https://github.com/CKickertz/ergon/commit/68a29ebb9173190072604b46734eb5a4801648b2))
+* **mneme:** data lifecycle — retention, migrations, backup ([#471](https://github.com/CKickertz/ergon/issues/471)) ([e0daa48](https://github.com/CKickertz/ergon/commit/e0daa48a9e456f517382e1c6bcb51da9958ada8e))
+* **mneme:** data lifecycle — RetentionPolicy with archive-before-delete, versioned schema migrations, BackupManager with VACUUM INTO + JSON export, backup CLI subcommand, docs/DATA.md sovereignty documentation ([e0daa48](https://github.com/CKickertz/ergon/commit/e0daa48a9e456f517382e1c6bcb51da9958ada8e))
+* nous execute stage, NousActor, melete distillation, agora routing (M3.6) ([6e8f2a9](https://github.com/CKickertz/ergon/commit/6e8f2a9ef203fe30b46a9b048d9536d54342db79))
+* **nous:** slash commands, thinking mode, thread model, privacy module, context editing ([9897a35](https://github.com/CKickertz/ergon/commit/9897a35a146c9ba5942f4f4b99b83ec7b3aa2db0))
+* **nous:** wire cross-nous router into NousManager, DaemonBridge trait for prosoche→nous communication, HermeneusExtractionProvider for post-finalize knowledge extraction, multi-nous ready gate with watch channel, two-phase startup sequence ([7f1c4bd](https://github.com/CKickertz/ergon/commit/7f1c4bdde1ea023989f0153263df3a8f0990011c))
+* **nous:** wire cross-nous, daemon bridge, extraction into runtime ([#474](https://github.com/CKickertz/ergon/issues/474)) ([7f1c4bd](https://github.com/CKickertz/ergon/commit/7f1c4bdde1ea023989f0153263df3a8f0990011c))
+* observability — Prometheus metrics, aletheia status CLI ([#494](https://github.com/CKickertz/ergon/issues/494)) ([8a64b0e](https://github.com/CKickertz/ergon/commit/8a64b0e793ebdb101488128a39463950cf8d62da))
+* oikos instance scaffold, taxis cascade resolution, koina+taxis crates (M0) ([446594a](https://github.com/CKickertz/ergon/commit/446594a915c7bf2ec066c64fe07c219a9714d427))
+* **pylon:** API contract — OpenAPI spec, versioned routes, error shape ([#493](https://github.com/CKickertz/ergon/issues/493)) ([b63c107](https://github.com/CKickertz/ergon/commit/b63c1075db57f329aef4b0045f79d4a3e2ab1bbd))
+* **pylon:** runtime security — TLS, CORS, limits, headers, redaction, CSRF ([#491](https://github.com/CKickertz/ergon/issues/491)) ([22f0fe2](https://github.com/CKickertz/ergon/commit/22f0fe264a027c103619dc6beb2a21be61eceac7))
+* resilience foundation — health tracking, user errors, reconnect, budgets ([#492](https://github.com/CKickertz/ergon/issues/492)) ([2a45a4f](https://github.com/CKickertz/ergon/commit/2a45a4f171493ff38f7ab802b90dd21b7126ff9f))
+* search, embeddings, routing, planning tools, and CI/CD ([546a434](https://github.com/CKickertz/ergon/commit/546a43482cd84da5b5adae9fd75991c3bc40ccd2))
+* security hardening, JWT auth, RBAC, and distillation ([687b41c](https://github.com/CKickertz/ergon/commit/687b41c516d533d79c27e0d3b7998a05874303e5))
+* TTS pipeline, event bus, skill learning, test suite, and release preparation ([21ea484](https://github.com/CKickertz/ergon/commit/21ea4848679b441fe32cc43537e8799c2db95c5c))
+* TUI dashboard MVP, UI fixes, zero-config onboarding ([10e3d64](https://github.com/CKickertz/ergon/commit/10e3d64016d86d3faf1262d944e41ee5761b0c41))
+* **ui:** Svelte 5 web UI — streaming, syntax highlighting, sidebar, slash commands ([c32caa5](https://github.com/CKickertz/ergon/commit/c32caa582b9bb1f9cb0e27817a83198846e9c8af))
+* **ui:** UI overhaul — light theme, SSE reliability, Voyage-4 embeddings migration ([a8ae55f](https://github.com/CKickertz/ergon/commit/a8ae55fa21f50e104b3998e7d091f4360b916376))
+
+
+### Bug Fixes
+
+* consolidate workspace files into theke/ — organize by subject, not agent ([4372852](https://github.com/CKickertz/ergon/commit/437285217365a965fa6941f5a8482e703b8d8bfb))
+* consolidate workspace files into theke/ ([#486](https://github.com/CKickertz/ergon/issues/486)) ([4372852](https://github.com/CKickertz/ergon/commit/437285217365a965fa6941f5a8482e703b8d8bfb))
+* hermeneus retry resilience, model fallback, taxis state migration ([38aaa79](https://github.com/CKickertz/ergon/commit/38aaa7918dc9f8664cda2a07dee90be0e6d2248a))
+* plans-db migration path and call-site bug ([0df5274](https://github.com/CKickertz/ergon/commit/0df527460950bb84e346ce00c5ec18b0beaba862))
+* plans-db migration path and call-site bug ([#487](https://github.com/CKickertz/ergon/issues/487)) ([0df5274](https://github.com/CKickertz/ergon/commit/0df527460950bb84e346ce00c5ec18b0beaba862))
+* **pylon:** wire session_store into NousManager — finalize stage now runs ([688c800](https://github.com/CKickertz/ergon/commit/688c800b099966ee58a1be1976bc1008e9b65f11))
+* **pylon:** wire session_store into NousManager ([#469](https://github.com/CKickertz/ergon/issues/469)) ([688c800](https://github.com/CKickertz/ergon/commit/688c800b099966ee58a1be1976bc1008e9b65f11))
+* resolve merge conflict artifacts from batch 50-60 ([6f811fc](https://github.com/CKickertz/ergon/commit/6f811fc32e31d9737d2ced6bd10d5cb9aa54cf1d))
+* resolve turn wall-clock timeout from config ([69c496e](https://github.com/CKickertz/ergon/commit/69c496e7cfac63a2316b4e90da3d8a039d42a4ee))
+* resolve turn wall-clock timeout from config ([#480](https://github.com/CKickertz/ergon/issues/480)) ([69c496e](https://github.com/CKickertz/ergon/commit/69c496e7cfac63a2316b4e90da3d8a039d42a4ee))
