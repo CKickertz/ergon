@@ -506,8 +506,16 @@ mod tests {
     fn write_script(name: &str, body: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("hermeneus_test_{name}_{}.sh", std::process::id()));
         let script = format!("#!/bin/sh\n{body}\n");
+        // WHY: Open, write, fsync, close, then set permissions. Without fsync
+        // the kernel may not have finished writing page cache to disk when we
+        // exec the script, producing ETXTBSY (errno 26) on Linux.
         #[expect(clippy::disallowed_methods, reason = "test helper writes temp scripts, async not needed")]
-        fs::write(&path, script.as_bytes()).unwrap();
+        {
+            use std::io::Write;
+            let mut f = fs::File::create(&path).unwrap();
+            f.write_all(script.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
     }
