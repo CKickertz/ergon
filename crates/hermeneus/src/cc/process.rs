@@ -117,12 +117,14 @@ pub(crate) async fn run_completion(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // WHY: Inject OAuth token from the credential file so CC authenticates
-    // without needing its own login state. CLAUDE_CODE_OAUTH_TOKEN bypasses
-    // CC's secure storage check and works even when CC reports "not logged in".
-    if let Ok(token) = read_oauth_token() {
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
-    }
+    // WHY: Clear auth-related env vars so the CLI uses its own credential store.
+    // The parent process may have ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN
+    // set (e.g. from a systemd EnvironmentFile). If the CLI inherits these, it
+    // sends the raw OAuth token to the API, which rejects it with 401. The CLI
+    // handles OAuth exchange correctly through its own credential management.
+    cmd.env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("CLAUDE_CODE_OAUTH_TOKEN");
 
     if let Some(sys) = system_prompt {
         cmd.arg("--system-prompt").arg(sys);
