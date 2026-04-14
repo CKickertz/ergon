@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.18.0](https://github.com/CKickertz/ergon/compare/v0.17.0...v0.18.0) (2026-04-14)
+
+
+### Features
+
+* **episteme,eidos,melete:** parameterize knowledge constants via taxis config ([#2306](https://github.com/CKickertz/ergon/issues/2306)) ([#3132](https://github.com/CKickertz/ergon/issues/3132)) ([22564b4](https://github.com/CKickertz/ergon/commit/22564b4ad1fa2a86c6841c6e322fe991ad8926e2))
+* **nous,taxis:** self-tuning feedback loop ([#2306](https://github.com/CKickertz/ergon/issues/2306) wave 6) ([#3137](https://github.com/CKickertz/ergon/issues/3137)) ([c1e8b70](https://github.com/CKickertz/ergon/commit/c1e8b701c5ef0efdcc22ee100ae78f4ab0904c5a))
+* **organon,agora,dianoia:** parameterize tool and planning constants via taxis config ([#2306](https://github.com/CKickertz/ergon/issues/2306)) ([#3133](https://github.com/CKickertz/ergon/issues/3133)) ([96d71b3](https://github.com/CKickertz/ergon/commit/96d71b35de4d898259568d1fdc156ed0e0bb3e74))
+* **organon,agora:** wire tool and channel constants to taxis config reads ([#2306](https://github.com/CKickertz/ergon/issues/2306)) ([#3136](https://github.com/CKickertz/ergon/issues/3136)) ([5562860](https://github.com/CKickertz/ergon/commit/55628601dd17e0108b06cbb09b242891db05dc1a))
+* **pylon,hermeneus,daemon:** parameterize infra constants via taxis config ([#2306](https://github.com/CKickertz/ergon/issues/2306)) ([#3130](https://github.com/CKickertz/ergon/issues/3130)) ([81727b7](https://github.com/CKickertz/ergon/commit/81727b7cba1b482bcfe2c79c6a7a803a56630409))
+* **taxis,organon,aletheia:** parameter registry + agent tool + CLI describe ([#2306](https://github.com/CKickertz/ergon/issues/2306)) ([#3135](https://github.com/CKickertz/ergon/issues/3135)) ([9b52daf](https://github.com/CKickertz/ergon/commit/9b52daf57c6a59a019c28720a7391952ebdc8398))
+
+
+### Bug Fixes
+
+* archived sessions, review-skills lock, lock handling, inclusive language ([#3171](https://github.com/CKickertz/ergon/issues/3171)) ([6bb51a9](https://github.com/CKickertz/ergon/commit/6bb51a951eab0fac07eff6389dbc297220ab3b28))
+* deployment upgrade path, CC provider routing, clippy zero-warnings ([#3154](https://github.com/CKickertz/ergon/issues/3154)) ([0d5d304](https://github.com/CKickertz/ergon/commit/0d5d3046dd661f846e51e7ed28049a8a243b6d77))
+* fsync temp scripts to prevent ETXTBSY, set GTK dark theme for CSD ([#3156](https://github.com/CKickertz/ergon/issues/3156)) ([e2f956d](https://github.com/CKickertz/ergon/commit/e2f956d5a5f81033b2d2ead4e808179578e2c5c2)), closes [#3146](https://github.com/CKickertz/ergon/issues/3146)
+* **krites:** replace 137 unreachable!() with proper error returns ([#3172](https://github.com/CKickertz/ergon/issues/3172)) ([a1a3347](https://github.com/CKickertz/ergon/commit/a1a3347181040c54bc396a5e874714c3b53df293)), closes [#3169](https://github.com/CKickertz/ergon/issues/3169)
+* pricing, CC parser, export validation, credential refresh, session field naming ([#3168](https://github.com/CKickertz/ergon/issues/3168)) ([ce1a488](https://github.com/CKickertz/ergon/commit/ce1a488b1cae66b7942381248c431af15183b7f0))
+* **proskenion:** embed CSS via include_str for reliable theme loading ([#3155](https://github.com/CKickertz/ergon/issues/3155)) ([ca0885e](https://github.com/CKickertz/ergon/commit/ca0885e7bf43a4734fd4381c8506ff04e692a80f)), closes [#3145](https://github.com/CKickertz/ergon/issues/3145)
+* resolve all high-severity security lint findings from kanon QA ([#3170](https://github.com/CKickertz/ergon/issues/3170)) ([0a87d23](https://github.com/CKickertz/ergon/commit/0a87d2347aac6163169283b98ace3721abe3d926)), closes [#3169](https://github.com/CKickertz/ergon/issues/3169)
+
+
+### Documentation
+
+* wave 7 constants completion audit ([#2306](https://github.com/CKickertz/ergon/issues/2306)) ([#3134](https://github.com/CKickertz/ergon/issues/3134)) ([1f8f93e](https://github.com/CKickertz/ergon/commit/1f8f93e0b1ff73bf7929116593aed736aff383e5))
+
 ## [0.17.0](https://github.com/forkwright/aletheia/compare/v0.16.0...v0.17.0) (2026-04-13)
 
 
